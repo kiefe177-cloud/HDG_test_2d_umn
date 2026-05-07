@@ -1,0 +1,25 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "CodeLLDB: Debug Driver",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/bin/driver.exe",
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "stopOnEntry": false,
+            "preLaunchTask": "CMake: build" 
+        },
+        {
+            "name": "CodeLLDB: Debug Cylinder Driver",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/bin/cyl_driver.exe",
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "stopOnEntry": false,
+            "preLaunchTask": "CMake: build"
+        }
+    ]
+}
