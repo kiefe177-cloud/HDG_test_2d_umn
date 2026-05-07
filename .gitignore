@@ -1,0 +1,17 @@
+# Ignore build directories
+build/
+out/
+
+# Ignore executables and compiled libraries
+*.exe
+*.a
+*.o
+*.dll
+*.so
+
+# Ignore output directories (your CFD results)
+output/
+
+# Ignore large HDF5 data files
+*.h5
+*.dat
