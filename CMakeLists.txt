@@ -51,6 +51,7 @@ set(SOURCE_FILES
     src/baseflow_flatplate_1d.cpp
     src/bl_similarity.cpp
     src/calc_geom_iso_tfi.cpp
+    src/calc_grads_strong.cpp
     src/comp_space_metrics.cpp
     src/generate_tfi.cpp
     src/fd_coeffs_uniform.cpp
@@ -64,6 +65,7 @@ set(SOURCE_FILES
     src/msh_amr_curv.cpp
     src/msh_connect.cpp
     src/msh_test_grad.cpp
+    src/multidof_ops.cpp
     src/ndgrid.cpp
     src/plot_comp_tfi_grid.cpp
     src/read_cone_dat_file.cpp

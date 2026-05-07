@@ -1,5 +1,6 @@
 #pragma once
 #include <Eigen/Dense>
+#include <Eigen/Sparse>
 
 // Element-face connectivity for an AMR mesh.
 struct Msh
@@ -11,11 +12,11 @@ struct Msh
         int p;
         Eigen::MatrixXd x;
         Eigen::MatrixXd y;
-        Eigen::MatrixXd J;
-        Eigen::MatrixXd Ja11;
-        Eigen::MatrixXd Ja12;
-        Eigen::MatrixXd Ja21;
-        Eigen::MatrixXd Ja22;
+        Eigen::SparseMatrix<double> J;
+        Eigen::SparseMatrix<double> Ja11;
+        Eigen::SparseMatrix<double> Ja12;
+        Eigen::SparseMatrix<double> Ja21;
+        Eigen::SparseMatrix<double> Ja22;
         Eigen::MatrixXd w1d;
         Eigen::MatrixXd r;
         Eigen::MatrixXd invr;
@@ -26,10 +27,9 @@ struct Msh
         int p;
         Eigen::MatrixXd x;
         Eigen::MatrixXd y;
-        Eigen::MatrixXd J;
-        Eigen::MatrixXd nx;
-        Eigen::MatrixXd ny;
-        Eigen::MatrixXd nn;
+        Eigen::SparseMatrix<double> nx;
+        Eigen::SparseMatrix<double> ny;
+        Eigen::SparseMatrix<double> nn;
         Eigen::MatrixXd w1d;
         Eigen::MatrixXd Jf;
         Eigen::MatrixXd r;

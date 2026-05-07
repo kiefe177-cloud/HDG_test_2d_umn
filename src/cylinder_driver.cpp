@@ -22,7 +22,7 @@ elliptic solve
 #include <cmath>
 
 #include "hdg/all.h" // Main driver files
-
+#include "hdg/mesh_utils.h"
 #include "hdg/io_utils.h" // For save_csv
 #include "hdg/save_grid_diagnostics.h" // For save_grid_diagnostics
 #include "parameters/MalikSpallParams.h"
@@ -369,14 +369,105 @@ int main(){
 
     // Faces interpolation
     std::cout <<"============ Creating Face Baseflow from elements ============"<< std::endl;
-    Eigen::MatrixXd brho_f = Eigen::MatrixXd::Zero((p+1),Nf);
-    Eigen::MatrixXd brhou_f = Eigen::MatrixXd::Zero((p+1),Nf);
-    Eigen::MatrixXd brhov_f = Eigen::MatrixXd::Zero((p+1),Nf);
-    Eigen::MatrixXd brhow_f = Eigen::MatrixXd::Zero((p+1),Nf);
-    Eigen::MatrixXd bE_f = Eigen::MatrixXd::Zero((p+1),Nf);
-    Eigen::MatrixXd bu_f = Eigen::MatrixXd::Zero((p+1),Nf);
-    Eigen::MatrixXd bv_f = Eigen::MatrixXd::Zero((p+1),Nf);
-    Eigen::MatrixXd bw_f = Eigen::MatrixXd::Zero((p+1),Nf);
-    Eigen::MatrixXd bp_f = Eigen::MatrixXd::Zero((p+1),Nf);
+
+    const int nf  = p + 1;
+    Eigen::MatrixXd brho_f = Eigen::MatrixXd::Zero((nf),Nf);
+    Eigen::MatrixXd brhou_f = Eigen::MatrixXd::Zero((nf),Nf);
+    Eigen::MatrixXd brhov_f = Eigen::MatrixXd::Zero((nf),Nf);
+    Eigen::MatrixXd brhow_f = Eigen::MatrixXd::Zero((nf),Nf);
+    Eigen::MatrixXd bE_f = Eigen::MatrixXd::Zero((nf),Nf);
+    Eigen::MatrixXd bu_f = Eigen::MatrixXd::Zero((nf),Nf);
+    Eigen::MatrixXd bv_f = Eigen::MatrixXd::Zero((nf),Nf);
+    Eigen::MatrixXd bw_f = Eigen::MatrixXd::Zero((nf),Nf);
+    Eigen::MatrixXd bp_f = Eigen::MatrixXd::Zero((nf),Nf);
+
+    const int faces_per_elem = msh.EtoF.rows();
+
+    for (int i1 = 0; i1 < Nf; ++i1) {
+        int e1 = msh.FtoE(0, i1);
+        int e2 = msh.FtoE(1, i1);
+
+        if (e2 < 0) {
+            int f1 = find_local_face(msh.EtoF, e1, i1, faces_per_elem);
+            assert(f1 >= 0);
+            const auto& T1 = op2.T[f1];   // already nf x npe; no slicing needed
+
+            brho_f.col(i1) = T1 * brho.col(e1);
+            bu_f.col(i1)   = T1 * bu.col(e1);
+            bv_f.col(i1)   = T1 * bv.col(e1);
+            bw_f.col(i1)   = T1 * bw.col(e1);
+            bp_f.col(i1)   = T1 * bp.col(e1);
+        }
+        else if (e1 < 0) {
+            int f2 = find_local_face(msh.EtoF, e2, i1, faces_per_elem);
+            assert(f2 >= 0);
+            const auto& T1 = op2.T[f2];
+
+            brho_f.col(i1) = T1 * brho.col(e2);
+            bu_f.col(i1)   = T1 * bu.col(e2);
+            bv_f.col(i1)   = T1 * bv.col(e2);
+            bw_f.col(i1)   = T1 * bw.col(e2);
+            bp_f.col(i1)   = T1 * bp.col(e2);
+        }
+        else {
+            int f1 = find_local_face(msh.EtoF, e1, i1, faces_per_elem);
+            int f2 = find_local_face(msh.EtoF, e2, i1, faces_per_elem);
+            assert(f1 >= 0 && f2 >= 0);
+
+            const auto& T_e1 = op2.T[f1];
+            const auto& T_e2 = op2.T[f2];
+
+            brho_f.col(i1) = 0.5 * (T_e1 * brho.col(e1) + T_e2 * brho.col(e2));
+            bu_f.col(i1)   = 0.5 * (T_e1 * bu.col(e1)   + T_e2 * bu.col(e2));
+            bv_f.col(i1)   = 0.5 * (T_e1 * bv.col(e1)   + T_e2 * bv.col(e2));
+            bw_f.col(i1)   = 0.5 * (T_e1 * bw.col(e1)   + T_e2 * bw.col(e2));
+            bp_f.col(i1)   = 0.5 * (T_e1 * bp.col(e1)   + T_e2 * bp.col(e2));
+        }
+
+        brhou_f.col(i1) = brho_f.col(i1).array() * bu_f.col(i1).array();
+        brhov_f.col(i1) = brho_f.col(i1).array() * bv_f.col(i1).array();
+        brhow_f.col(i1) = brho_f.col(i1).array() * bw_f.col(i1).array();
+
+        bE_f.col(i1) = bp_f.col(i1).array() / (gam - 1.0)
+                    + 0.5 * brho_f.col(i1).array()
+                        * ( bu_f.col(i1).array().square()
+                            + bv_f.col(i1).array().square()
+                            + bw_f.col(i1).array().square() );
+
+        const double r_tol = 1e-10;
+        msh.face[i1].r    = msh.face[i1].y.cwiseMax(r_tol);
+        msh.face[i1].invr = (1.0 / msh.face[i1].r.array()).matrix();   // adjust per type
+
+        if ((bp_f.col(i1).array() < 0.0).any()) {
+            std::printf("Warning: Negative Pressure on Face %d\n", i1);
+        }
+    }
     
+    Eigen::MatrixXd bU_f(5 * nf, Nf);
+    bU_f << brho_f,
+        brhou_f,
+        brhov_f,
+        brhow_f,
+        bE_f;
+    
+    save_csv(std::string(OUTPUT_DIR) + "/bU_f.csv",bU_f);
+    Eigen::MatrixXd face_x(nf, Nf);
+    Eigen::MatrixXd face_y(nf, Nf);
+    for (int i1 = 0; i1 < Nf; ++i1) {
+        face_x.col(i1) = msh.face[i1].x.reshaped();
+        face_y.col(i1) = msh.face[i1].y.reshaped();
+    }
+    
+    save_csv(std::string(OUTPUT_DIR) + "/face_x.csv",face_x);
+    save_csv(std::string(OUTPUT_DIR) + "/face_y.csv",face_y);
+
+    Grad_Variables grad_variables =calc_grads_strong(bU,bU_f,msh,nvar,op1,op2);
+
+    save_csv(std::string(OUTPUT_DIR) + "/bUx.csv",grad_variables.bUx);
+    save_csv(std::string(OUTPUT_DIR) + "/bUy.csv",grad_variables.bUy);
+    save_csv(std::string(OUTPUT_DIR) + "/bUz.csv",grad_variables.bUz);
+
+    save_csv(std::string(OUTPUT_DIR) + "/bUx_f.csv",grad_variables.bUx_f);
+    save_csv(std::string(OUTPUT_DIR) + "/bUy_f.csv",grad_variables.bUy_f);
+    save_csv(std::string(OUTPUT_DIR) + "/bUz_f.csv",grad_variables.bUz_f);
 }
