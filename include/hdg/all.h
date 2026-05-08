@@ -6,6 +6,7 @@
 #include "hdg/blendx.h"
 #include "hdg/comp_space_metrics.h"
 #include "hdg/calc_grads_strong.h"
+#include "hdg/dg_mat2_Roe.h"
 #include "hdg/elliptic_result.h"
 #include "hdg/generate_tfi.h"
 #include "hdg/GLDeriv.h"

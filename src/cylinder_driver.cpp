@@ -20,16 +20,31 @@ elliptic solve
 #include <highfive/H5File.hpp>
 #include <string>
 #include <cmath>
+#include <Eigen/Sparse>
+#include <complex>
 
 #include "hdg/all.h" // Main driver files
 #include "hdg/mesh_utils.h"
 #include "hdg/io_utils.h" // For save_csv
 #include "hdg/save_grid_diagnostics.h" // For save_grid_diagnostics
 #include "parameters/MalikSpallParams.h"
+#include "hdg/debug_print.h"  
 
 using namespace Eigen;
 
 int main(){
+    {
+        Eigen::SparseMatrix<double> _dbg_sp(1, 1);
+        Eigen::MatrixXd _dbg_dense(1, 1);
+        Eigen::VectorXd _dbg_vec(1);
+        Eigen::SparseMatrix<std::complex<double>> _dbg_sp_c(1, 1);
+        volatile double _sink = 0.0;
+        _sink += dat(_dbg_sp, 0, 0);
+        _sink += dat(_dbg_dense, 0, 0);
+        _sink += dat(_dbg_vec, 0);
+        _sink += dat(_dbg_sp_c, 0, 0).real();
+        (void)_sink;
+    }
 
     SimulationParams params = get_malik_spall_params();
 
@@ -461,7 +476,7 @@ int main(){
     save_csv(std::string(OUTPUT_DIR) + "/face_x.csv",face_x);
     save_csv(std::string(OUTPUT_DIR) + "/face_y.csv",face_y);
 
-    Grad_Variables grad_variables =calc_grads_strong(bU,bU_f,msh,nvar,op1,op2);
+    Grad_Variables grad_variables = calc_grads_strong(bU,bU_f,msh,nvar,op1,op2);
 
     save_csv(std::string(OUTPUT_DIR) + "/bUx.csv",grad_variables.bUx);
     save_csv(std::string(OUTPUT_DIR) + "/bUy.csv",grad_variables.bUy);
@@ -470,4 +485,9 @@ int main(){
     save_csv(std::string(OUTPUT_DIR) + "/bUx_f.csv",grad_variables.bUx_f);
     save_csv(std::string(OUTPUT_DIR) + "/bUy_f.csv",grad_variables.bUy_f);
     save_csv(std::string(OUTPUT_DIR) + "/bUz_f.csv",grad_variables.bUz_f);
+
+
+    dg dg_out = dg_mat_2Roe(params, omega,msh,nvar,op1,op2, bU, grad_variables.bUx, grad_variables.bUy, grad_variables.bUz,
+                            bU_f, grad_variables.bUx_f, grad_variables.bUy_f, grad_variables.bUz_f,
+                            m);
 }

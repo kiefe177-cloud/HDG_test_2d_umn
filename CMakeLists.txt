@@ -9,8 +9,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE Release)
+    set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
 endif()
+
+set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g3")
+
+message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 
 add_compile_options(-Wno-stringop-overflow)   # suppress false positive from Eigen sparse
 
@@ -53,8 +57,12 @@ set(SOURCE_FILES
     src/calc_geom_iso_tfi.cpp
     src/calc_grads_strong.cpp
     src/comp_space_metrics.cpp
+    src/debug_print.cpp
+    src/dg_mat2_Roe.cpp
     src/generate_tfi.cpp
     src/fd_coeffs_uniform.cpp
+    src/flux_lin_euler.cpp
+    src/flux_lin_viscous.cpp
     src/GLDeriv.cpp
     src/GLQuad.cpp
     src/interp1.cpp
@@ -74,6 +82,7 @@ set(SOURCE_FILES
     src/sem1.cpp
     src/sem2.cpp
     src/Spline.cpp
+    src/sparse_utils.cpp
     src/tfi_elliptic_full_orthogonal.cpp
     src/tfi_elliptic_orthogonal.cpp
     src/tfi_elliptic_solve.cpp
