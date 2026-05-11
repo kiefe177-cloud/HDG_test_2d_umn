@@ -22,4 +22,4 @@ struct viscous_fluxes {
 };
 
 viscous_fluxes flux_lin_visc(const Eigen::VectorXd& bU,const Eigen::VectorXd& bUx,const Eigen::VectorXd& bUy,const Eigen::VectorXd& bUz,
-                            const SimulationParams& params, const int nvar, const int m, const Eigen::SparseMatrix<double>& invr);
+                            const SimulationParams& params, const int nvar, const int m, const Eigen::MatrixXd& invr);

@@ -14,13 +14,14 @@ struct dg
     using SparseCD  = Eigen::SparseMatrix<std::complex<double>>;
     using SparseD   = Eigen::SparseMatrix<double>;
     
+
     SparseCD A;
-    SparseD B;
-    SparseD C;
-    SparseD D;
+    SparseCD B;
+    SparseD  C;
+    SparseCD D;
 
     std::vector<SparseCD>   Ik;
-    std::vector<SparseD>    QB;
+    std::vector<SparseCD>   QB;
     std::vector<SparseD>    QC;
     std::vector<SparseD>    QiD;
     

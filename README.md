@@ -5,6 +5,8 @@ cmake -G "MinGW Makefiles" ..
 mingw32-make
 ctest
 
+cmake --build build
+
 using namespace Eigen
 
 Need to cd into output to plot data.

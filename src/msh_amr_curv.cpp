@@ -49,8 +49,8 @@ Msh msh_amr_curv(const int p, AmrNode& amr,const PhysMesh& phys_msh){
     msh.FtoE = connect.FtoE;
     msh.EtoF = connect.EtoF;
 
-    //write_csv(msh.EtoF, "EtoF_cpp.csv");
-    //write_csv(msh.FtoE, "FtoE_cpp.csv");
+    write_csv(msh.EtoF, "EtoF_cpp.csv");
+    write_csv(msh.FtoE, "FtoE_cpp.csv");
 
     Eigen::VectorXd r,w;
 

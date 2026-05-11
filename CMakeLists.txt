@@ -81,6 +81,7 @@ set(SOURCE_FILES
     src/sd.cpp
     src/sem1.cpp
     src/sem2.cpp
+    src/source_terms_Q.cpp
     src/Spline.cpp
     src/sparse_utils.cpp
     src/tfi_elliptic_full_orthogonal.cpp

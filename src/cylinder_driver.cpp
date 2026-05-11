@@ -53,7 +53,7 @@ int main(){
     int p = 12;
     int Ne_x = 8;
 
-    int m = 0;
+    int m = 1;
 
     double F_final = 1.17e-4;
 
@@ -465,6 +465,9 @@ int main(){
         brhow_f,
         bE_f;
     
+        
+    std::cout <<"============ Face Baseflow Complete ============"<< std::endl;
+
     save_csv(std::string(OUTPUT_DIR) + "/bU_f.csv",bU_f);
     Eigen::MatrixXd face_x(nf, Nf);
     Eigen::MatrixXd face_y(nf, Nf);
@@ -486,7 +489,8 @@ int main(){
     save_csv(std::string(OUTPUT_DIR) + "/bUy_f.csv",grad_variables.bUy_f);
     save_csv(std::string(OUTPUT_DIR) + "/bUz_f.csv",grad_variables.bUz_f);
 
-
+    
+    std::cout <<"============ Creating DG Matrices ============"<< std::endl;
     dg dg_out = dg_mat_2Roe(params, omega,msh,nvar,op1,op2, bU, grad_variables.bUx, grad_variables.bUy, grad_variables.bUz,
                             bU_f, grad_variables.bUx_f, grad_variables.bUy_f, grad_variables.bUz_f,
                             m);

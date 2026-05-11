@@ -11,18 +11,34 @@
 //
 // These are non-inline so they exist as callable symbols in the binary,
 // which lets LLDB invoke them via `expr dat(M, i, j)`.
-int    dnnz(const Eigen::SparseMatrix<double>& M);
-int    dnnz(const Eigen::SparseMatrix<std::complex<double>>& M);
-int    drows(const Eigen::SparseMatrix<double>& M);
-int    dcols(const Eigen::SparseMatrix<double>& M);
-double dmaxabs(const Eigen::SparseMatrix<double>& M);
-double dminabs(const Eigen::SparseMatrix<double>& M);
-double dnorm(const Eigen::SparseMatrix<double>& M);
-double dat(const Eigen::SparseMatrix<double>& M, int i, int j);
+
+double               dat(const Eigen::SparseMatrix<double>& M, int i, int j);
 std::complex<double> dat(const Eigen::SparseMatrix<std::complex<double>>& M,
                          int i, int j);
-double dat(const Eigen::MatrixXd& M, int i, int j);
-double dat(const Eigen::VectorXd& v, int i);
+double               dat(const Eigen::MatrixXd& M, int i, int j);
+double               dat(const Eigen::VectorXd& v, int i);
+
+// ============================================================
+// Stats / metadata (defined in debug_print.cpp)
+// ============================================================
+
+int    dnnz   (const Eigen::SparseMatrix<double>& M);
+int    dnnz   (const Eigen::SparseMatrix<std::complex<double>>& M);
+
+int    drows  (const Eigen::SparseMatrix<double>& M);
+int    drows  (const Eigen::SparseMatrix<std::complex<double>>& M);
+
+int    dcols  (const Eigen::SparseMatrix<double>& M);
+int    dcols  (const Eigen::SparseMatrix<std::complex<double>>& M);
+
+double dmaxabs(const Eigen::SparseMatrix<double>& M);
+double dmaxabs(const Eigen::SparseMatrix<std::complex<double>>& M);
+
+double dminabs(const Eigen::SparseMatrix<double>& M);
+double dminabs(const Eigen::SparseMatrix<std::complex<double>>& M);
+
+double dnorm  (const Eigen::SparseMatrix<double>& M);
+double dnorm  (const Eigen::SparseMatrix<std::complex<double>>& M);
 
 // ============================================================
 // Full dense-grid print
