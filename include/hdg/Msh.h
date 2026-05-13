@@ -17,7 +17,7 @@ struct Msh
         Eigen::SparseMatrix<double> Ja12;
         Eigen::SparseMatrix<double> Ja21;
         Eigen::SparseMatrix<double> Ja22;
-        Eigen::MatrixXd w1d;
+        Eigen::VectorXd w1d;
         Eigen::MatrixXd r;
         Eigen::MatrixXd invr;
         
@@ -25,15 +25,15 @@ struct Msh
     struct Face
     {
         int p;
-        Eigen::MatrixXd x;
-        Eigen::MatrixXd y;
+        Eigen::VectorXd x;
+        Eigen::VectorXd y;
         Eigen::SparseMatrix<double> nx;
         Eigen::SparseMatrix<double> ny;
         Eigen::SparseMatrix<double> nn;
-        Eigen::MatrixXd w1d;
-        Eigen::MatrixXd Jf;
-        Eigen::MatrixXd r;
-        Eigen::MatrixXd invr;
+        Eigen::VectorXd w1d;
+        Eigen::VectorXd Jf;
+        Eigen::VectorXd r;
+        Eigen::VectorXd invr;
     };  // Nf
 
     std::vector<Elem> elem;

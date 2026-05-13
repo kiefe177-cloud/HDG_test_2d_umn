@@ -5,11 +5,11 @@
 #include "sem1.h"
 
 // 1. Define the output struct:
-struct Sem2Op{
-    Eigen::SparseMatrix<double> M;  // Mass Matrix (Diagonal)
-    std::vector<Eigen::MatrixXd> S;              // Stiffness Matrix 
-    std::vector<Eigen::SparseMatrix<double>> L; // Left Boundary operator
-    std::vector<Eigen::SparseMatrix<double>> T; // Right Boundary operator
+struct Sem2Op {
+    Eigen::SparseMatrix<double> M;
+    std::vector<Eigen::SparseMatrix<double>> S;   // <-- sparse, not MatrixXd
+    std::vector<Eigen::SparseMatrix<double>> L;
+    std::vector<Eigen::SparseMatrix<double>> T;
 };
 
 // 2. Declare Function:

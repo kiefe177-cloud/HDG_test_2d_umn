@@ -22,22 +22,6 @@ SpMatD selector(int var_idx, int n, int N) {
     return S;
 }
 
-// Promote a real sparse matrix to complex (zero imaginary part).
-SpMatC to_complex(const SpMatD& A) {
-    SpMatC B(A.rows(), A.cols());
-    std::vector<Eigen::Triplet<cdouble>> trips;
-    trips.reserve(A.nonZeros());
-    for (int k = 0; k < A.outerSize(); ++k) {
-        for (SpMatD::InnerIterator it(A, k); it; ++it) {
-            trips.emplace_back(static_cast<int>(it.row()),
-                               static_cast<int>(it.col()),
-                               cdouble(it.value(), 0.0));
-        }
-    }
-    B.setFromTriplets(trips.begin(), trips.end());
-    return B;
-}
-
 // Vertically stack 5 complex sparse matrices of equal column count.
 SpMatC vstack5(const SpMatC& A0, const SpMatC& A1, const SpMatC& A2,
                const SpMatC& A3, const SpMatC& A4)
@@ -224,47 +208,45 @@ source_terms source_terms_Q(const Eigen::VectorXd& bU,
             + 0.5*(bu*bu+bv*bv+bw*bw)*rho);
     
             // Operands reused in complex strain-rate / flux expressions.
-    const SpMatC binvr_c = to_complex(binvr);
-    const SpMatC u_c     = to_complex(u);
-    const SpMatC v_c     = to_complex(v);
-    const SpMatC w_c     = to_complex(w);
-    const SpMatC u_x_c   = to_complex(u_x);
-    const SpMatC v_y_c   = to_complex(v_y);
-    const SpMatC w_y_c   = to_complex(w_y);
-    const SpMatC T_c     = to_complex(T);
-    const SpMatC mu_c    = to_complex(mu);
+    const SpMatC binvr_c =  binvr.cast<cdouble>();
+    const SpMatC u_c     =  u.cast<cdouble>();
+    const SpMatC v_c     =  v.cast<cdouble>();
+    const SpMatC w_c     =  w.cast<cdouble>();
+    const SpMatC u_x_c   =  u_x.cast<cdouble>();
+    const SpMatC v_y_c   =  v_y.cast<cdouble>();
+    const SpMatC w_y_c   =  w_y.cast<cdouble>();
+    const SpMatC T_c     =  T.cast<cdouble>();
+    const SpMatC mu_c    =  mu.cast<cdouble>();
 
     
     // 1i * m
     const cdouble im(0.0, static_cast<double>(m));
 
-    // ===== linearized strain-rate operators (now reading like the MATLAB) =====
-    // divu = u_x + v_y + invr*v + 1i*m*invr*w
-    const SpMatC divu = u_x_c + v_y_c + binvr_c * v_c + im * binvr_c * w_c;
-    
-    // Szz = 2*(1i*m*invr*w + invr*v) - 2/3*divu
-    const SpMatC Szz = 2.0 * (im * binvr_c * w_c + binvr_c * v_c) - two_thirds * divu;
-    
-    // Syz = 1i*m*invr*v + w_y - invr*w
-    const SpMatC Syz = im * binvr_c * v_c + w_y_c - binvr_c * w_c;
+    const SpMatC binvr_w   = binvr_c * w_c;
+    const SpMatC binvr_v_  = binvr_c * v_c;
+    const SpMatC im_binvr_w = im * binvr_w;
+    const SpMatC im_binvr_v = im * binvr_v_;
 
+    const SpMatC divu = u_x_c + v_y_c + binvr_v_ + im_binvr_w;
+    const SpMatC Szz  = 2.0 * (im_binvr_w + binvr_v_) - two_thirds * divu;
+    const SpMatC Syz  = im_binvr_v + w_y_c - binvr_w;
     // ===== assemble F, G, H (5n × Ntot) =====
     const SpMatC Z_row(n, Ntot);  // zero block
 
     const cdouble inv_Re   (1.0 / Re,  0.0);
 
     // Background quantities used in F/G/H assembly.
-    const SpMatC bmu_c   = to_complex(bmu);
-    const SpMatC bu_c    = to_complex(bu);
-    const SpMatC bv_c    = to_complex(bv);
-    const SpMatC bw_c    = to_complex(bw);
-    const SpMatC bSzz_c  = to_complex(bSzz);
-    const SpMatC bSyz_c  = to_complex(bSyz);
-    const SpMatC p_c     = to_complex(p);
-    const SpMatC rhow_c  = to_complex(rhow);
-    const SpMatC brhow_c = to_complex(brhow);
-    const SpMatC rhov_c  = to_complex(rhov);
-    const SpMatC brhov_c = to_complex(brhov);
+    const SpMatC bmu_c   =  bmu.cast<cdouble>();
+    const SpMatC bu_c    =  bu.cast<cdouble>();
+    const SpMatC bv_c    =  bv.cast<cdouble>();
+    const SpMatC bw_c    =  bw.cast<cdouble>();
+    const SpMatC bSzz_c  =  bSzz.cast<cdouble>();
+    const SpMatC bSyz_c  =  bSyz.cast<cdouble>();
+    const SpMatC p_c     =  p.cast<cdouble>();
+    const SpMatC rhow_c  =  rhow.cast<cdouble>();
+    const SpMatC brhow_c =  brhow.cast<cdouble>();
+    const SpMatC rhov_c  =  rhov.cast<cdouble>();
+    const SpMatC brhov_c =  brhov.cast<cdouble>();
     
 
     SpMatC Q = vstack5(
@@ -298,6 +280,11 @@ source_terms source_terms_Q(const Eigen::VectorXd& bU,
     out.Qx = take_real(Q.middleCols(1 * N, N));
     out.Qy = take_real(Q.middleCols(2 * N, N));
     out.Qz = take_real(Q.middleCols(3 * N, N));
+
+    out.Q.prune(cdouble(0.0, 0.0),1e-14);
+    out.Qx.prune(0.0, 1e-14);
+    out.Qy.prune(0.0, 1e-14);
+    out.Qz.prune(0.0, 1e-14);
 
     return out;
 

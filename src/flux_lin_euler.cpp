@@ -118,5 +118,8 @@ inviscid_fluxes flux_lin_euler(const Eigen::VectorXd& bU, const SimulationParams
         brhow*w + bw*rhow + p,
         (bE + bp)*w + bw*(E+p));
 
+    out.F.prune(0.0, 1e-14);
+    out.G.prune(0.0, 1e-14);
+    out.H.prune(0.0, 1e-14);
     return out;
 }

@@ -23,22 +23,6 @@ SpMatD selector(int var_idx, int n, int N) {
     return S;
 }
 
-// Promote a real sparse matrix to complex (zero imaginary part).
-SpMatC to_complex(const SpMatD& A) {
-    SpMatC B(A.rows(), A.cols());
-    std::vector<Eigen::Triplet<cdouble>> trips;
-    trips.reserve(A.nonZeros());
-    for (int k = 0; k < A.outerSize(); ++k) {
-        for (SpMatD::InnerIterator it(A, k); it; ++it) {
-            trips.emplace_back(static_cast<int>(it.row()),
-                               static_cast<int>(it.col()),
-                               cdouble(it.value(), 0.0));
-        }
-    }
-    B.setFromTriplets(trips.begin(), trips.end());
-    return B;
-}
-
 // Vertically stack 5 complex sparse matrices of equal column count.
 SpMatC vstack5(const SpMatC& A0, const SpMatC& A1, const SpMatC& A2,
                const SpMatC& A3, const SpMatC& A4)
@@ -268,34 +252,34 @@ viscous_fluxes flux_lin_visc(const Eigen::VectorXd& bU,
     // =========================================================
 
     // Operands reused in complex strain-rate / flux expressions.
-    const SpMatC binvr_c = to_complex(binvr);
-    const SpMatC u_c     = to_complex(u);
-    const SpMatC v_c     = to_complex(v);
-    const SpMatC w_c     = to_complex(w);
-    const SpMatC u_x_c   = to_complex(u_x);
-    const SpMatC u_y_c   = to_complex(u_y);
-    const SpMatC v_x_c   = to_complex(v_x);
-    const SpMatC v_y_c   = to_complex(v_y);
-    const SpMatC w_x_c   = to_complex(w_x);
-    const SpMatC w_y_c   = to_complex(w_y);
-    const SpMatC T_c     = to_complex(T);
-    const SpMatC T_x_c   = to_complex(T_x);
-    const SpMatC T_y_c   = to_complex(T_y);
-    const SpMatC mu_c    = to_complex(mu);
+    const SpMatC binvr_c =  binvr.cast<cdouble>();
+    const SpMatC u_c     =  u.cast<cdouble>();
+    const SpMatC v_c     =  v.cast<cdouble>();
+    const SpMatC w_c     =  w.cast<cdouble>();
+    const SpMatC u_x_c   =  u_x.cast<cdouble>();
+    const SpMatC u_y_c   =  u_y.cast<cdouble>();
+    const SpMatC v_x_c   =  v_x.cast<cdouble>();
+    const SpMatC v_y_c   =  v_y.cast<cdouble>();
+    const SpMatC w_x_c   =  w_x.cast<cdouble>();
+    const SpMatC w_y_c   =  w_y.cast<cdouble>();
+    const SpMatC T_c     =  T.cast<cdouble>();
+    const SpMatC T_x_c   =  T_x.cast<cdouble>();
+    const SpMatC T_y_c   =  T_y.cast<cdouble>();
+    const SpMatC mu_c    =  mu.cast<cdouble>();
 
     // Background quantities used in F/G/H assembly.
-    const SpMatC bmu_c   = to_complex(bmu);
-    const SpMatC bu_c    = to_complex(bu);
-    const SpMatC bv_c    = to_complex(bv);
-    const SpMatC bw_c    = to_complex(bw);
-    const SpMatC bSxx_c  = to_complex(bSxx);
-    const SpMatC bSyy_c  = to_complex(bSyy);
-    const SpMatC bSzz_c  = to_complex(bSzz);
-    const SpMatC bSxy_c  = to_complex(bSxy);
+    const SpMatC bmu_c   =  bmu.cast<cdouble>();
+    const SpMatC bu_c    =  bu.cast<cdouble>();
+    const SpMatC bv_c    =  bv.cast<cdouble>();
+    const SpMatC bw_c    =  bw.cast<cdouble>();
+    const SpMatC bSxx_c  =  bSxx.cast<cdouble>();
+    const SpMatC bSyy_c  =  bSyy.cast<cdouble>();
+    const SpMatC bSzz_c  =  bSzz.cast<cdouble>();
+    const SpMatC bSxy_c  =  bSxy.cast<cdouble>();
     const SpMatC bSyx_c  = bSxy_c;
-    const SpMatC bSxz_c  = to_complex(bSxz);
+    const SpMatC bSxz_c  =  bSxz.cast<cdouble>();
     const SpMatC bSzx_c  = bSxz_c;
-    const SpMatC bSyz_c  = to_complex(bSyz);
+    const SpMatC bSyz_c  =  bSyz.cast<cdouble>();
     const SpMatC bSzy_c  = bSyz_c;
 
     // 1i * m
@@ -395,6 +379,21 @@ viscous_fluxes flux_lin_visc(const Eigen::VectorXd& bU,
     out.Hx = take_real(H.middleCols(1 * N, N));
     out.Hy = take_real(H.middleCols(2 * N, N));
     out.Hz = take_real(H.middleCols(3 * N, N));
+
+    out.F.prune(cdouble(0.0, 0.0),1e-14);
+    out.Fx.prune(0.0, 1e-14);
+    out.Fy.prune(0.0, 1e-14);
+    out.Fz.prune(0.0, 1e-14);
+
+    out.G.prune(cdouble(0.0, 0.0),1e-14);
+    out.Gx.prune(0.0, 1e-14);
+    out.Gy.prune(0.0, 1e-14);
+    out.Gz.prune(0.0, 1e-14);
+
+    out.H.prune(cdouble(0.0, 0.0),1e-14);
+    out.Hx.prune(0.0, 1e-14);
+    out.Hy.prune(0.0, 1e-14);
+    out.Hz.prune(0.0, 1e-14);
 
     return out;
 }

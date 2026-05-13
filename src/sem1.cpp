@@ -17,7 +17,11 @@ Sem1Op sem1(int p){
     Eigen::MatrixXd Dr = GLDeriv(p);
 
     op.M = sd(w);
-    op.S = (sd(w) * Dr).transpose();
+
+    // (sd(w) * Dr).transpose() is dense because Dr is dense.
+    // Build it dense, sparsify, then assign.
+    Eigen::MatrixXd S_dense = (sd(w) * Dr).transpose();
+    op.S = S_dense.sparseView(0.0, 1e-14);
 
     // 3. Compute Left and Right Boundary Operators
     op.Lm.resize(N,N);

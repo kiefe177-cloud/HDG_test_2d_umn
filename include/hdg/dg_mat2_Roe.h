@@ -8,6 +8,8 @@
 #include <Eigen/Sparse>
 #include <complex>
 #include <vector>
+#include <memory>
+#include <Eigen/SparseLU>
 
 struct dg
 {
@@ -17,13 +19,14 @@ struct dg
 
     SparseCD A;
     SparseCD B;
-    SparseD  C;
+    SparseCD C;
     SparseCD D;
 
     std::vector<SparseCD>   Ik;
     std::vector<SparseCD>   QB;
-    std::vector<SparseD>    QC;
-    std::vector<SparseD>    QiD;
+    std::vector<SparseCD>   QC;
+
+    std::vector<std::unique_ptr<Eigen::SparseLU<SparseD>>> D_factors;
     
 };
 

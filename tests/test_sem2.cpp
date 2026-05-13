@@ -38,8 +38,8 @@ int main(){
     std::cout << "[PASS] Mass Matrix M" << std::endl;
 
     // 2. Verify Stiffness Matrices S
-    MatrixXd expected_Sx = Eigen::kroneckerProduct(MatrixXd(op1.M), op1.S);
-    MatrixXd expected_Sy = Eigen::kroneckerProduct(op1.S, MatrixXd(op1.M));
+    SparseMatrix<double> expected_Sx = Eigen::kroneckerProduct(MatrixXd(op1.M), op1.S);
+    SparseMatrix<double> expected_Sy = Eigen::kroneckerProduct(op1.S, MatrixXd(op1.M));
 
     // Verify Sx (S[0])
     assert(op.S[0].isApprox(expected_Sx, tol) && "Stiffness Matrix Sx mismatch");

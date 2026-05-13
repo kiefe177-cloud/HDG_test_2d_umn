@@ -62,17 +62,25 @@ Sem2Op sem2(int p){
     // 3. Construct 2D operators via Kronecker products
     // Mass Matrix
     op.M = kroneckerProduct(op1.M, op1.M);
+    op.M.prune(0.0, 1e-14);
 
-    // Stiffness Matrices
     op.S.resize(2);
-    op.S[0] = kroneckerProduct(MatrixXd(op1.M), op1.S);
-    op.S[1] = kroneckerProduct(op1.S, MatrixXd(op1.M)); 
-
+    op.S[0] = kroneckerProduct(op1.M, op1.S);
+    op.S[0].prune(0.0, 1e-14);
+    op.S[1] = kroneckerProduct(op1.S, op1.M);
+    op.S[1].prune(0.0, 1e-14);
+    
     VectorXd r,w;
     GLQuad(p, r, w);
 
-    MatrixXd P12, P13, P21, P31;
-    proj(p, r, P12, P13, P21, P31);
+    MatrixXd P12_d, P13_d, P21_d, P31_d;
+    proj(p, r, P12_d, P13_d, P21_d, P31_d);
+
+    // Sparsify projection matrices (they're dense N×N but small)
+    SparseMatrix<double> P12 = P12_d.sparseView(0.0, 1e-14);
+    SparseMatrix<double> P13 = P13_d.sparseView(0.0, 1e-14);
+    SparseMatrix<double> P21 = P21_d.sparseView(0.0, 1e-14);
+    SparseMatrix<double> P31 = P31_d.sparseView(0.0, 1e-14);
 
     int N = p + 1;
     SparseMatrix<double> I(N,N);
@@ -87,15 +95,27 @@ Sem2Op sem2(int p){
     SparseMatrix<double> SmT = Sm.transpose();
     SparseMatrix<double> SpT = Sp.transpose();
 
-    // Helper to compute kron(A,B) and push to L
-    auto add_L = [&](const auto& A, const auto& B, const MatrixXd* P = nullptr) {
+    auto add_L = [&](const auto& A, const auto& B, 
+                    const SparseMatrix<double>* P = nullptr) {
         SparseMatrix<double> K = kroneckerProduct(A, B);
         if (P) {
-            // If P is provided, multiply: K * P
-            MatrixXd denseRes = K * (*P);
-            op.L.push_back(denseRes.sparseView()); // Convert to sparse and push
+            SparseMatrix<double> KP = K * (*P);   // sparse × sparse → sparse
+            KP.prune(0.0, 1e-14);
+            op.L.push_back(KP);
         } else {
             op.L.push_back(K);
+        }
+    };
+
+    auto add_T = [&](const auto& A, const auto& B, 
+                    const SparseMatrix<double>* P = nullptr) {
+        SparseMatrix<double> K = kroneckerProduct(A, B);
+        if (P) {
+            SparseMatrix<double> PK = (*P) * K;
+            PK.prune(0.0, 1e-14);
+            op.T.push_back(PK);
+        } else {
+            op.T.push_back(K);
         }
     };
 
@@ -114,18 +134,6 @@ Sem2Op sem2(int p){
     add_L(op1.M, SpT, &P31);    // L9
     add_L(SmT, op1.M, &P31);    // L10
     add_L(SpT, op1.M, &P31);    // L11
-
-    // Helper to compute kron(A,B) and push to T
-    auto add_T = [&](const auto& A, const auto& B, const MatrixXd* P = nullptr) {
-        SparseMatrix<double> K = kroneckerProduct(A, B);
-        if (P) {
-            // P * K
-            MatrixXd denseRes = (*P) * K;
-            op.T.push_back(denseRes.sparseView());
-        } else {
-            op.T.push_back(K);
-        }
-    };
 
     // Trace Operators
     add_T(I, Sm);          // T0

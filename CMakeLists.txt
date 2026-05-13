@@ -63,8 +63,10 @@ set(SOURCE_FILES
     src/fd_coeffs_uniform.cpp
     src/flux_lin_euler.cpp
     src/flux_lin_viscous.cpp
+    src/flux_split.cpp
     src/GLDeriv.cpp
     src/GLQuad.cpp
+    src/get_tau_visc.cpp
     src/interp1.cpp
     src/jacobiP.cpp
     src/jacobiZerosGW.cpp
