@@ -59,10 +59,12 @@ set(SOURCE_FILES
     src/comp_space_metrics.cpp
     src/debug_print.cpp
     src/dg_mat2_Roe.cpp
+    src/dg_solve.cpp
     src/generate_tfi.cpp
     src/fd_coeffs_uniform.cpp
     src/flux_lin_euler.cpp
     src/flux_lin_viscous.cpp
+    src/flux_lin_viscous_face.cpp
     src/flux_split.cpp
     src/GLDeriv.cpp
     src/GLQuad.cpp

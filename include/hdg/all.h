@@ -7,6 +7,7 @@
 #include "hdg/comp_space_metrics.h"
 #include "hdg/calc_grads_strong.h"
 #include "hdg/dg_mat2_Roe.h"
+#include "hdg/dg_solve.h"
 #include "hdg/debug_print.h"
 #include "hdg/elliptic_result.h"
 #include "hdg/generate_tfi.h"

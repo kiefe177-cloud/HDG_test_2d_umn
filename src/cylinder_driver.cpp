@@ -22,6 +22,8 @@ elliptic solve
 #include <cmath>
 #include <Eigen/Sparse>
 #include <complex>
+#include <fstream>
+#include <unsupported/Eigen/KroneckerProduct>
 
 #include "hdg/all.h" // Main driver files
 #include "hdg/mesh_utils.h"
@@ -31,6 +33,43 @@ elliptic solve
 #include "hdg/debug_print.h"  
 
 using namespace Eigen;
+
+static Eigen::SparseMatrix<double> kron_sparse(const Eigen::SparseMatrix<double>& A, const Eigen::SparseMatrix<double>& B) {
+    Eigen::SparseMatrix<double> result = Eigen::kroneckerProduct(A, B);   // <-- explicit type
+    result.prune(0.0, 1e-14);
+    return result;
+}
+
+void save_sparse_complex_binary(const Eigen::SparseMatrix<std::complex<double>>& A,
+                                 const std::string& filepath) {
+    std::ofstream f(filepath, std::ios::binary);
+    if (!f) {
+        throw std::runtime_error("Could not open file for writing: " + filepath);
+    }
+    
+    // Header: rows, cols, nnz — all as doubles for simple MATLAB reading
+    double rows = static_cast<double>(A.rows());
+    double cols = static_cast<double>(A.cols());
+    double nnz  = static_cast<double>(A.nonZeros());
+    
+    f.write(reinterpret_cast<const char*>(&rows), sizeof(double));
+    f.write(reinterpret_cast<const char*>(&cols), sizeof(double));
+    f.write(reinterpret_cast<const char*>(&nnz),  sizeof(double));
+    
+    // Each entry: row (1-indexed), col (1-indexed), real, imag — all doubles
+    for (int k = 0; k < A.outerSize(); ++k) {
+        for (Eigen::SparseMatrix<std::complex<double>>::InnerIterator it(A, k); it; ++it) {
+            double row = static_cast<double>(it.row() + 1);   // 1-indexed for MATLAB
+            double col = static_cast<double>(it.col() + 1);
+            double re  = it.value().real();
+            double im  = it.value().imag();
+            f.write(reinterpret_cast<const char*>(&row), sizeof(double));
+            f.write(reinterpret_cast<const char*>(&col), sizeof(double));
+            f.write(reinterpret_cast<const char*>(&re),  sizeof(double));
+            f.write(reinterpret_cast<const char*>(&im),  sizeof(double));
+        }
+    }
+}
 
 int main(){
     {
@@ -494,4 +533,75 @@ int main(){
     dg dg_out = dg_mat_2Roe(params, omega,msh,nvar,op1,op2, bU, grad_variables.bUx, grad_variables.bUy, grad_variables.bUz,
                             bU_f, grad_variables.bUx_f, grad_variables.bUy_f, grad_variables.bUz_f,
                             m);
+
+    // std::cout << "============ Saving matrices for MATLAB comparison ============" << std::endl;
+    // const std::string out = OUTPUT_DIR;
+    // save_sparse_complex_binary(dg_out.A, out + "/dg_A_cpp.bin");
+    // save_sparse_complex_binary(dg_out.B, out + "/dg_B_cpp.bin");
+    // save_sparse_complex_binary(dg_out.C, out + "/dg_C_cpp.bin");
+    // save_sparse_complex_binary(dg_out.D, out + "/dg_D_cpp.bin");
+    // save_sparse_complex_binary(dg_out.Ik[0], out + "/dg_Ik_cpp.bin");
+    // save_sparse_complex_binary(dg_out.QB[0], out + "/dg_QB_cpp.bin");
+    // save_sparse_complex_binary(dg_out.QC[0], out + "/dg_QC_cpp.bin");
+    // std::cout << "Saved A, B, C, D to " << out << "\n";
+
+    MultidofOps ops = multidof_ops(nvar, op1, op2);
+    Eigen::SparseMatrix<double> I_nvar(nvar, nvar);
+    I_nvar.setIdentity();
+
+    Eigen::VectorXd src_e = Eigen::VectorXd::Zero(Ne * Me);
+    Eigen::VectorXd src_f = Eigen::VectorXd::Zero(Nf * Mf);
+
+    for (int i1 = 0; i1 < Ne; ++i1) {
+        const int j1 = Me * i1;
+
+        Eigen::VectorXd x = msh.elem[i1].x.reshaped();
+        Eigen::VectorXd y = msh.elem[i1].y.reshaped();
+
+        Eigen::SparseMatrix<double> J = kron_sparse(I_nvar, msh.elem[i1].J);
+
+        Eigen::VectorXd rho = (-5.0 * ((x.array() - (100.0 + xmin)).square()
+                                    + (y.array() - (14.0 + R_inner)).square())).exp().matrix();
+
+        Eigen::VectorXd state_vector = Eigen::VectorXd::Zero(nvar * npe);
+        state_vector.segment(0, npe) = rho;
+        const double coeff = 1.0 / ((params.gam - 1.0) * params.M * params.M);
+        state_vector.segment(4 * npe, npe) = coeff * rho;
+
+        src_e.segment(j1, Me) = J * ops.M * state_vector;
+    }
+
+    // Lift into the 3-block per-element structure expected by dg_solve
+    Eigen::SparseMatrix<double> e1(3, 1);
+    e1.insert(0, 0) = 1.0;
+    e1.makeCompressed();
+
+    Eigen::SparseMatrix<double> I_Me(Me, Me);
+    I_Me.setIdentity();
+
+    Eigen::SparseMatrix<double> I_Ne(Ne, Ne);
+    I_Ne.setIdentity();
+
+    Eigen::SparseMatrix<double> Sel1 = kron_sparse(I_Ne, kron_sparse(e1, I_Me));
+
+    Eigen::VectorXd src_e_full = Sel1 * src_e;   // size 3*Me*Ne, ready for the solve
+
+    // // --- ADD THESE LINES FOR DEBUGGING ---
+    // Eigen::Index maxIndex; // Eigen uses its own Index type (usually equivalent to ptrdiff_t)
+    // double maxValue = src_e_full.maxCoeff(&maxIndex);
+    // std::cout << "DEBUG: Max value in src_e_full is " << maxValue 
+    //           << " at index " << maxIndex << std::endl;
+    // // -------------------------------------
+
+    // Calculate the L2 norm of the real vector
+    // double l2_norm = src_e_full.norm();
+
+    // std::cout << "The L2 norm is: " << l2_norm << std::endl;
+
+    Eigen::VectorXcd src_e_cd = src_e_full.cast<std::complex<double>>();
+    Eigen::VectorXcd src_f_cd = src_f.cast<std::complex<double>>();
+
+    HDG_Result result_hdg = dg_solve(src_e_cd,src_f_cd,msh,dg_out,nvar);
+
+
 }

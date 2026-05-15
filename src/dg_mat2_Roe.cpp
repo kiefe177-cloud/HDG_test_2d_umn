@@ -2,6 +2,7 @@
 #include "hdg/multidof_ops.h"
 #include "hdg/flux_lin_euler.h"
 #include "hdg/flux_lin_visc.h"
+#include "hdg/flux_lin_viscous_face.h"
 #include "hdg/debug_print.h"
 #include "hdg/source_terms_Q.h"
 #include "hdg/vec.h"
@@ -99,12 +100,6 @@ dg dg_mat_2Roe(const SimulationParams& params, const double omega,
 
     MultidofOps ops = multidof_ops(nvar, op1, op2);
 
-    // std::cout << "sem1.M nnz: "    << op1.M.nonZeros()    << "\n";
-    // std::cout << "sem1.S nnz: "    << op1.S.nonZeros()    << "\n";
-    // std::cout << "sem2.M nnz: "    << op2.M.nonZeros()    << "\n";
-    // std::cout << "sem2.S[0] nnz: " << op2.S[0].nonZeros() << "\n";
-    // std::cout << "ops.S[0] nnz: "  << ops.S[0].nonZeros()      << "\n";
-
     SparseD I(nvar,nvar);
     I.setIdentity();
 
@@ -119,10 +114,7 @@ dg dg_mat_2Roe(const SimulationParams& params, const double omega,
     diag5.insert(4,4) = 1.0;
     diag5.makeCompressed();
 
-    //std::cout <<"test 1" << std::endl;
-
     SparseD BC_adiabatic = kron_sparse(diag5,Ip);
-
 
     double Tw = params.Tw;
     double Mach = params.M;
@@ -135,7 +127,7 @@ dg dg_mat_2Roe(const SimulationParams& params, const double omega,
 
     SparseD BC_iso = kron_sparse(diag5_iso,Ip);
     
-    SparseD BC = BC_iso;
+    SparseD BC = BC_adiabatic;
 
     result.A.resize(3 * Ne * Me, 3 * Ne * Me);
     result.B.resize(3 * Ne * Me, Nf * Mf);
@@ -148,7 +140,6 @@ dg dg_mat_2Roe(const SimulationParams& params, const double omega,
     result.D_factors.resize(Ne);
 
     const int rows_per_var = p + 1;
-    const int ncols = bU_f.cols();
 
     auto brho_face  = bU_f.middleRows(0 * rows_per_var, rows_per_var);
     auto brhou_face = bU_f.middleRows(1 * rows_per_var, rows_per_var);
@@ -156,12 +147,14 @@ dg dg_mat_2Roe(const SimulationParams& params, const double omega,
     auto brhow_face = bU_f.middleRows(3 * rows_per_var, rows_per_var);
     auto bE_face    = bU_f.middleRows(4 * rows_per_var, rows_per_var);
 
-    // Invariants
+    /// Invariants
     const SparseCD M_c = ops.M.cast<cdouble>();
+    const SparseCD M0_c = ops.M0.cast<cdouble>();
     const SparseCD S_0_c = ops.S[0].cast<cdouble>();
     const SparseCD S_1_c = ops.S[1].cast<cdouble>();
     SparseD I2(2, 2); 
-    I2.setIdentity();        // 1i * m
+    I2.setIdentity();        
+    // 1i * m
     const cdouble im(0.0, static_cast<double>(m));
     // 1i * omega
     const cdouble iomega(0.0, omega);
@@ -171,12 +164,21 @@ dg dg_mat_2Roe(const SimulationParams& params, const double omega,
 
     double x_sponge_layer = (xmax - xmin) * 0.1;
     double sponge_start_x = xmax - x_sponge_layer;
-    
-    // OUTSIDE the i1 loop:
-    std::vector<Eigen::Triplet<cdouble>> A_triplets;
-    // Rough: each elem_block has ~5 nnz per row × 3Me rows = 15*Me, times Ne elements
-    A_triplets.reserve(static_cast<size_t>(15) * Me * Ne);
 
+    std::vector<SparseCD> Lf_c(12);
+    std::vector<SparseCD> Tf_c(12);
+    for (int f = 0; f < 12; ++f) {
+        Lf_c[f] = ops.L[f].cast<cdouble>();
+        Tf_c[f] = ops.T[f].cast<cdouble>();
+    }
+    
+
+    ////////////////////////// dg.A ////////////////////////////////////
+    std::cout << "===== dg.A started =====" << std::endl;
+
+    // Setup dg.A
+    std::vector<Eigen::Triplet<cdouble>> A_triplets;
+    A_triplets.reserve(static_cast<size_t>(15) * Me * Ne);
 
     for (int i1 = 0; i1 < Ne; ++i1){
         SparseD J = kron_sparse(I,msh.elem[i1].J);
@@ -188,33 +190,14 @@ dg dg_mat_2Roe(const SimulationParams& params, const double omega,
         SparseD rV = kron_sparse(I,sd(vec(msh.elem[i1].r)));
         SparseD invrV = kron_sparse(I,sd(vec(msh.elem[i1].invr)));
 
-        //std::cout << "bU (first 10): " << bU.col(i1).head(10) << std::endl;
-
         // Call flux functions
-        auto t_loop = std::chrono::high_resolution_clock::now();
-        inviscid_fluxes inv_flux = flux_lin_euler(bU.col(i1),params,nvar);
-        auto t_loop_end = std::chrono::high_resolution_clock::now();
-        std::cout << "flux_inv took "
-             << std::chrono::duration<double>(t_loop_end - t_loop).count()
-             << " s\n";
+        inviscid_fluxes inv_flux = flux_lin_euler(bU.col(i1), params, nvar);
+        viscous_fluxes visc_flux = flux_lin_visc(bU.col(i1), bUx.col(i1), bUy.col(i1), bUz.col(i1), params, nvar, m, msh.elem[i1].invr);
+        source_terms source_terms = source_terms_Q(bU.col(i1), bUx.col(i1), bUy.col(i1), bUz.col(i1), params, nvar, m, msh.elem[i1].invr);
+
         SparseD F = inv_flux.F;
         SparseD G = inv_flux.G;
         SparseD H = inv_flux.H;
-        // std::cout << "F nnz: " << F.nonZeros() << "\n";
-        // std::cout << "F explicit zeros: ";
-        // int z = 0;
-        // for (int k = 0; k < F.outerSize(); ++k)
-        //     for (SparseD::InnerIterator it(F, k); it; ++it)
-        //         if (it.value() == 0.0) ++z;
-        // std::cout << z << "\n";
-
-        t_loop = std::chrono::high_resolution_clock::now();
-        viscous_fluxes visc_flux = flux_lin_visc(bU.col(i1),bUx.col(i1),bUy.col(i1),bUz .col(i1),
-                                                params,nvar,m,msh.elem[i1].invr);
-        t_loop_end = std::chrono::high_resolution_clock::now();
-        std::cout << "flux_visc took "
-             << std::chrono::duration<double>(t_loop_end - t_loop).count()
-             << " s\n";
 
         SparseCD Fv = visc_flux.F;
         SparseD Fvx = visc_flux.Fx;
@@ -231,17 +214,12 @@ dg dg_mat_2Roe(const SimulationParams& params, const double omega,
         SparseD Hvy = visc_flux.Hy;
         SparseD Hvz = visc_flux.Hz;
 
-        t_loop = std::chrono::high_resolution_clock::now();
-        source_terms source_terms = source_terms_Q(bU.col(i1),bUx.col(i1),bUy.col(i1),bUz.col(i1),params, nvar, m, msh.elem[i1].invr);
-        t_loop_end = std::chrono::high_resolution_clock::now();
-        std::cout << "flux_source took "
-             << std::chrono::duration<double>(t_loop_end - t_loop).count()
-             << " s\n";
         SparseCD Qr_t = source_terms.Q;
         SparseD Qr_tx = source_terms.Qx;
         SparseD Qr_ty = source_terms.Qy;
         SparseD Qr_tz = source_terms.Qz;
 
+        // Put together SEM fluxes
         SparseD Ft = Ja11*F + Ja12*G;
         SparseD Gt = Ja21*F + Ja22*G;
 
@@ -252,27 +230,9 @@ dg dg_mat_2Roe(const SimulationParams& params, const double omega,
         SparseD Fvyt = Ja11*Fvy + Ja12*Gvy;
         SparseD Gvyt = Ja21*Fvy + Ja22*Gvy;
         
-
+        // Cast everything to complex once, reuse from here on
         // 1i * invr
         SparseCD i_invr = cdouble(0.0, 1.0) * invrV.cast<cdouble>();
-
-        
-        // std::cout << "F:   " << F.rows()   << " x " << F.cols()   << "\n";
-        // std::cout << "Fv:  " << Fv.rows()  << " x " << Fv.cols()  << "\n";
-        // std::cout << "H:   " << H.rows()   << " x " << H.cols()   << "\n";
-        // std::cout << "Hv:  " << Hv.rows()  << " x " << Hv.cols()  << "\n";
-        // std::cout << "Hvz: " << Hvz.rows() << " x " << Hvz.cols() << "\n";
-        // std::cout << "Qr_t:   " << Qr_t.rows()   << " x " << Qr_t.cols()   << "\n";
-        // std::cout << "Qr_tz:  " << Qr_tz_c.rows()<< " x " << Qr_tz_c.cols()<< "\n";
-        // std::cout << "invrV: " << invrV.rows() << " x " << invrV.cols() << "\n";
-        // std::cout << "rV:    " << rV.rows()    << " x " << rV.cols()    << "\n";
-        // std::cout << "J:     " << J.rows()     << " x " << J.cols()     << "\n";
-        // std::cout << "M:     " << ops.M.rows() << " x " << ops.M.cols() << "\n";
-        // std::cout << "S[0]:  " << ops.S[0].rows() << " x " << ops.S[0].cols() << "\n";
-
-        t_loop = std::chrono::high_resolution_clock::now();
-        // Cast everything to complex once, reuse from here on.
-        // (S_0_c, S_1_c, M_c, im, iomega, m_d_c were hoisted outside the i1 loop.)
         const SparseCD rV_c    = rV.cast<cdouble>();
         const SparseCD invrV_c = invrV.cast<cdouble>();
         const SparseCD J_c     = J.cast<cdouble>();
@@ -289,12 +249,9 @@ dg dg_mat_2Roe(const SimulationParams& params, const double omega,
         const SparseCD Qr_tx_c = Qr_tx.cast<cdouble>();
         const SparseCD Qr_ty_c = Qr_ty.cast<cdouble>();
         const SparseCD Qr_tz_c = Qr_tz.cast<cdouble>();
-        // Qr_t, Fvt, Gvt, Hv, Gv, Fv are already SparseCD — no cast needed.
 
-        // J*M shows up in A, Bx, and By — compute once.
+
         const SparseCD JM_c = J_c * M_c;
-
-        // S * rV shows up twice in A's correction and once each in Bx, By corrections.
         const SparseCD S0_rV = S_0_c * rV_c;
         const SparseCD S1_rV = S_1_c * rV_c;
 
@@ -316,20 +273,14 @@ dg dg_mat_2Roe(const SimulationParams& params, const double omega,
         Bx -= S0_rV * Fvxt_c + S1_rV * Gvxt_c;
         By -= S0_rV * Fvyt_c + S1_rV * Gvyt_c;
 
-        t_loop_end = std::chrono::high_resolution_clock::now();
-        std::cout << "part 1 took "
-             << std::chrono::duration<double>(t_loop_end - t_loop).count()
-             << " s\n";
-
-        t_loop = std::chrono::high_resolution_clock::now();
         // Stabilization Matix
         for (int f = 0; f < 12; ++f) {
             int i2 = msh.EtoF(f, i1);
-            if (i2 >= 0) {   // or > 0 if your sentinel is 0; check this
+            if (i2 >= 0) { 
                 SparseD nn = msh.face[i2].nn;
                 SparseD nx_t = face_sgn(f) * msh.face[i2].nx;
                 SparseD ny_t = face_sgn(f) * msh.face[i2].ny;
-                SparseD nn_kron = kron_sparse(I, msh.face[i2].nn);   // .nn, not .r
+                SparseD nn_kron = kron_sparse(I, msh.face[i2].nn);
                 SparseD r_face  = kron_sparse(I, sd(vec(msh.face[i2].r)));
 
                 flux_split_jacobians flux_Jac = flux_split(bU_f.col(i2), nx_t, ny_t, nn, params, nvar);
@@ -341,7 +292,6 @@ dg dg_mat_2Roe(const SimulationParams& params, const double omega,
 
                 A += term_visc_stab.cast<cdouble>();
 
-                //SparseD r_face = kron_sparse(I,sd(vec(msh.face[i2].r)));
                 SparseD nx = face_sgn(f)* kron_sparse(I,msh.face[i2].nx);
                 SparseD ny = face_sgn(f)* kron_sparse(I,msh.face[i2].ny);
 
@@ -352,15 +302,11 @@ dg dg_mat_2Roe(const SimulationParams& params, const double omega,
                 By += boundaryTerm_y.cast<cdouble>();
             }
         }
-        t_loop_end = std::chrono::high_resolution_clock::now();
-        std::cout << "face part took "
-             << std::chrono::duration<double>(t_loop_end - t_loop).count()
-             << " s\n";
-        // Sponge layer — once per element, OUTSIDE the face loop
-        Eigen::VectorXd x_flat = msh.elem[i1].x.reshaped();
+
+        // Sponge layer
+        //Eigen::VectorXd x_flat = msh.elem[i1].x.reshaped();
         //Eigen::VectorXd y_flat = msh.elem[i1].y.reshaped();
 
-        // Skip elements entirely outside the sponge zone
         if (msh.elem[i1].x.maxCoeff() < sponge_start_x) {
             // Entirely outside — no sponge contribution
             // Do nothing; just skip the sponge code
@@ -373,20 +319,19 @@ dg dg_mat_2Roe(const SimulationParams& params, const double omega,
             A += sponge_term.cast<cdouble>();
         }
 
-        auto t1 = std::chrono::high_resolution_clock::now();
-
+        //auto t1 = std::chrono::high_resolution_clock::now();
         SparseD Cx_real = ops.S[0]*(rV*Ja11) + ops.S[1]*(rV*Ja21);
         SparseD Cy_real = ops.S[0]*(rV*Ja12) + ops.S[1]*(rV*Ja22) + J*ops.M;
         SparseD D_real  = rV * J * ops.M;
-
-        auto t2 = std::chrono::high_resolution_clock::now();
+        //auto t2 = std::chrono::high_resolution_clock::now();
 
         // Complex casts for block assembly
         SparseCD Cx = Cx_real.cast<cdouble>();
         SparseCD Cy = Cy_real.cast<cdouble>();
         SparseCD D  = D_real.cast<cdouble>();
 
-        // Stash blocks into global result.A (uncondensed form)
+        // Stash blocks into global result.A (uncondensed form) 
+        // May not need for code
         const int j1 = 3 * Me * i1;
         auto stash = [&](const SparseCD& B, int row_off, int col_off) {
             for (int k = 0; k < B.outerSize(); ++k)
@@ -407,7 +352,7 @@ dg dg_mat_2Roe(const SimulationParams& params, const double omega,
         SparseCD QB = sparse_block_t<cdouble>({{ Bx, By }});
         SparseCD QC = sparse_block_t<cdouble>({{ Cx }, { Cy }});
 
-        auto t3 = std::chrono::high_resolution_clock::now();
+        //auto t3 = std::chrono::high_resolution_clock::now();
 
         // Factor D once — store for later use in dg_solve
         auto solver = std::make_unique<Eigen::SparseLU<SparseD>>();
@@ -416,17 +361,18 @@ dg dg_mat_2Roe(const SimulationParams& params, const double omega,
             std::cerr << "SparseLU factorization failed on element " << i1 << "\n";
         }
 
-        auto t4 = std::chrono::high_resolution_clock::now();
+        //auto t4 = std::chrono::high_resolution_clock::now();
 
-        // Form inv(D) LOCALLY for the iK computation (this is the fast path for matmul)
+        // Form inv(D) LOCALLY for the iK computation
         Eigen::MatrixXd I_dense = Eigen::MatrixXd::Identity(D_real.rows(), D_real.cols());
         SparseD Dinv_real = solver->solve(I_dense).sparseView(0.0, 1e-14);
 
-        auto t5 = std::chrono::high_resolution_clock::now();
+        //auto t5 = std::chrono::high_resolution_clock::now();
 
         // Build iK = A - QB * QiD * QC where QiD = kron(I_2, inv(D))
         SparseCD QiD = kron_sparse(I2, Dinv_real).cast<cdouble>();
         SparseCD iK = A - QB * QiD * QC;
+        iK.prune(cdouble(0.0, 0.0), 1e-14);
 
         // Store factorization (NOT inv(D) or QiD) for downstream use in dg_solve
         result.QB[i1]  = QB;
@@ -434,12 +380,267 @@ dg dg_mat_2Roe(const SimulationParams& params, const double omega,
         result.D_factors[i1] = std::move(solver);
         result.Ik[i1]  = iK;
 
-        std::cout << "  Cx/Cy/D build:     " << std::chrono::duration<double>(t2-t1).count() << " s\n";
-        std::cout << "  cast+stash+QB/QC:  " << std::chrono::duration<double>(t3-t2).count() << " s\n";
-        std::cout << "  SparseLU compute:  " << std::chrono::duration<double>(t4-t3).count() << " s\n";
-        std::cout << "  form inv(D):       " << std::chrono::duration<double>(t5-t4).count() << " s\n";
+        // std::cout << "  Cx/Cy/D build:     " << std::chrono::duration<double>(t2-t1).count() << " s\n";
+        // std::cout << "  cast+stash+QB/QC:  " << std::chrono::duration<double>(t3-t2).count() << " s\n";
+        // std::cout << "  SparseLU compute:  " << std::chrono::duration<double>(t4-t3).count() << " s\n";
+        // std::cout << "  form inv(D):       " << std::chrono::duration<double>(t5-t4).count() << " s\n";
     }
+    
+    // Put together dg.A, may not need to compile
     result.A.setFromTriplets(A_triplets.begin(), A_triplets.end());
+    result.A.prune(cdouble(0.0, 0.0), 1e-14);
+
+    A_triplets.clear();
+    A_triplets.shrink_to_fit();
 
     std::cout << "===== dg.A complete =====" << std::endl;
+
+    ////////////////////////// dg.B ////////////////////////////////////
+    std::cout << "===== dg.B started =====" << std::endl;
+
+    std::vector<Eigen::Triplet<cdouble>> B_triplets;
+    B_triplets.reserve(static_cast<size_t>(15)* Me * Ne);
+
+    for (int i1 = 0; i1 < Ne; ++i1)
+    {
+        int j0 = 3*Me*i1;
+
+        for (int f = 0; f < 12; ++f)
+        {
+            int i2 = msh.EtoF(f,i1);
+            if (i2 >= 0)
+            {
+                int k1 = Mf*(i2);
+
+                SparseD nx = face_sgn(f) * kron_sparse(I, msh.face[i2].nx);
+                SparseD ny = face_sgn(f) * kron_sparse(I, msh.face[i2].ny);
+                SparseD r_f = kron_sparse(I,sd(msh.face[i2].r));
+                Eigen::VectorXd invr_f = msh.face[i2].invr;
+                
+                viscous_fluxes_face viscous_fluxes_face_out = flux_lin_visc_face(bU_f.col(i2),bU_fx.col(i2),bU_fy.col(i2),bU_fz.col(i2),params, nvar,m, invr_f);
+
+                SparseCD Fv = viscous_fluxes_face_out.F;
+                SparseCD Gv = viscous_fluxes_face_out.G;
+
+                SparseD nn = msh.face[i2].nn;
+                SparseD nx_t = face_sgn(f) * msh.face[i2].nx;
+                SparseD ny_t = face_sgn(f) * msh.face[i2].ny;
+                SparseD nn_kron = kron_sparse(I,msh.face[i2].nn);
+
+                flux_split_jacobians flux_Jac = flux_split(bU_f.col(i2),nx_t,ny_t,nn,params,nvar);
+
+                SparseD Tau_matrix_visc = get_tau_visc(msh,brho_face,brhou_face,brhov_face,brhow_face,bE_face,params,c_v,i2,i1);
+
+                SparseCD Av = (nx.cast<cdouble>()*(Fv) + ny.cast<cdouble>()*(Gv));
+
+                SparseCD Tau_matrix_visc_c = Tau_matrix_visc.cast<cdouble>();
+                SparseCD Am_c = flux_Jac.Am.cast<cdouble>();
+                SparseCD Ap_c = flux_Jac.Ap.cast<cdouble>();
+                SparseCD rf_c = r_f.cast<cdouble>(); 
+                SparseCD nn_kron_c = nn_kron.cast<cdouble>(); 
+
+                SparseCD term = Lf_c[f]*(rf_c*(Av + 2.0*Am_c - Tau_matrix_visc_c*nn_kron_c));
+                SparseD gradient_term_x = -ops.L[f]*nx*r_f;
+                SparseD gradient_term_y = -ops.L[f]*ny*r_f;
+
+                auto stash_B = [&](const SparseCD& B, int row_start, int col_start) {
+                    for (int k = 0; k < B.outerSize(); ++k)
+                        for (SparseCD::InnerIterator it(B, k); it; ++it)
+                            B_triplets.emplace_back(row_start + it.row(),
+                                                    col_start + it.col(),
+                                                    it.value());
+                };
+
+                stash_B(term,j0,k1);
+                stash_B(gradient_term_x.cast<cdouble>(),j0 + Me,k1);
+                stash_B(gradient_term_y.cast<cdouble>(),j0 + 2*Me,k1);
+
+            }
+        }
+    }
+    
+    result.B.setFromTriplets(B_triplets.begin(), B_triplets.end());
+    result.B.prune(cdouble(0.0, 0.0), 1e-14);
+
+    B_triplets.clear();
+    B_triplets.shrink_to_fit();
+
+    std::cout << "===== dg.B complete =====" << std::endl;
+    ////////////////////////// dg.C ////////////////////////////////////
+    std::cout << "===== dg.C started =====" << std::endl;
+
+    std::vector<Eigen::Triplet<cdouble>> C_triplets;
+    C_triplets.reserve(static_cast<size_t>(15)* Me * Ne);
+
+    for (int i1 = 0; i1 < Ne; ++i1){
+        int j0 = 3*Me*i1;
+        Eigen::MatrixXd invr = msh.elem[i1].invr;
+        viscous_fluxes viscous_fluxes_out = flux_lin_visc(bU.col(i1),bUx.col(i1),bUy.col(i1),bUz.col(i1),params,nvar,m,invr);
+
+        for (int f = 0; f < 12; ++f)
+        {
+            int i2 = msh.EtoF(f,i1);
+            
+            if (i2 >= 0)
+            {
+                int k1 = Mf*(i2);
+
+                SparseD r_f = kron_sparse(I, sd(msh.face[i2].r));
+                SparseD nx = face_sgn(f) * kron_sparse(I, msh.face[i2].nx);
+                SparseD ny = face_sgn(f) * kron_sparse(I, msh.face[i2].ny);
+
+                SparseD nn_kron = kron_sparse(I, msh.face[i2].nn);
+
+                SparseD nn = msh.face[i2].nn;
+                SparseD nx_t = face_sgn(f) * msh.face[i2].nx;
+                SparseD ny_t = face_sgn(f) * msh.face[i2].ny;
+
+                flux_split_jacobians flux_Jac = flux_split(bU_f.col(i2),nx_t,ny_t,nn,params,nvar);
+
+                SparseD Tau_matrix_visc = get_tau_visc(msh,brho_face,brhou_face,brhov_face,brhow_face,bE_face,params,c_v,i2,i1);
+
+                auto stash_C = [&](const SparseCD& B, int row_start, int col_start) {
+                for (int k = 0; k < B.outerSize(); ++k)
+                    for (SparseCD::InnerIterator it(B, k); it; ++it)
+                        C_triplets.emplace_back(row_start + it.row(),
+                                                col_start + it.col(),
+                                                it.value());
+                };
+
+                // Assuming msh.FtoE is an Eigen::MatrixXi
+                if (msh.FtoE(0, i2) < 0 || msh.FtoE(1, i2) < 0) {
+                    // This is a boundary face
+
+                    if (msh.FtoE(0 , i2) == -3 || msh.FtoE(1, i2) == -3)
+                    {
+                        SparseD wall_term = 2.0*ops.M0*r_f*BC*ops.T[f];
+                        stash_C(wall_term.cast<cdouble>(),k1,j0);
+                    } else {
+                        SparseD main_term = ops.M0*r_f*(flux_Jac.Ap + Tau_matrix_visc*nn_kron)*ops.T[f];
+                        SparseD x_term = ops.M0*r_f*(nx*ops.T[f]*viscous_fluxes_out.Fx + ny*ops.T[f]*viscous_fluxes_out.Gx);
+                        SparseD y_term = ops.M0*r_f*(nx*ops.T[f]*viscous_fluxes_out.Fy + ny*ops.T[f]*viscous_fluxes_out.Gy);
+
+                        stash_C(main_term.cast<cdouble>(),k1,j0);
+                        stash_C(x_term.cast<cdouble>(),k1,j0+Me);
+                        stash_C(y_term.cast<cdouble>(),k1,j0+2*Me);
+                    }
+                } else {
+                    SparseD main_term = ops.M0*r_f*(flux_Jac.Ap - flux_Jac.Am + Tau_matrix_visc*nn_kron)*ops.T[f];
+                    SparseD x_term = ops.M0*r_f*(nx*ops.T[f]*viscous_fluxes_out.Fx + ny*ops.T[f]*viscous_fluxes_out.Gx);
+                    SparseD y_term = ops.M0*r_f*(nx*ops.T[f]*viscous_fluxes_out.Fy + ny*ops.T[f]*viscous_fluxes_out.Gy);
+                    
+                    stash_C(main_term.cast<cdouble>(),k1,j0);
+                    stash_C(x_term.cast<cdouble>(),k1,j0+Me);
+                    stash_C(y_term.cast<cdouble>(),k1,j0+2*Me);
+                }
+            }  
+        }
+
+    }
+    result.C.setFromTriplets(C_triplets.begin(), C_triplets.end());
+    result.C.prune(cdouble(0.0, 0.0), 1e-14);
+
+    C_triplets.clear();
+    C_triplets.shrink_to_fit();
+
+    std::cout << "===== dg.C complete =====" << std::endl;
+
+    ////////////////////////// dg.D ////////////////////////////////////
+    std::vector<Eigen::Triplet<cdouble>> D_triplets;
+    D_triplets.reserve(static_cast<size_t>(15)* Mf * Nf);
+
+    for (int i1 = 0; i1 < Nf; ++i1)
+    {
+        int e1 = msh.FtoE(0,i1);
+        int e2 = msh.FtoE(1,i1);
+        
+        int k1 = Mf*i1;
+
+        SparseD r_f = kron_sparse(I, sd(msh.face[i1].r));
+        Eigen::VectorXd invr_f = msh.face[i1].invr;
+
+        SparseD nn = msh.face[i1].nn;
+        SparseD nn_kron = kron_sparse(I, nn);
+
+        SparseCD r_fc = r_f.cast<cdouble>();
+
+        auto stash_D = [&](const SparseCD& B, int row_start, int col_start) {
+        for (int k = 0; k < B.outerSize(); ++k)
+            for (SparseCD::InnerIterator it(B, k); it; ++it)
+                D_triplets.emplace_back(row_start + it.row(),
+                                        col_start + it.col(),
+                                        it.value());
+        };
+
+        if (e1 < 0)
+        {
+            if (e1 == -3){
+                SparseCD main_term = -2.0*r_fc*M0_c;
+                stash_D(main_term,k1,k1);
+            } else {
+                SparseD nx_t = -msh.face[i1].nx;
+                SparseD ny_t = -msh.face[i1].ny;
+
+                SparseCD nx_k_c = (-1.0*kron_sparse(I,msh.face[i1].nx)).cast<cdouble>();
+                SparseCD ny_k_c = (-1.0*kron_sparse(I,msh.face[i1].ny)).cast<cdouble>();
+
+                flux_split_jacobians flux_Jac = flux_split(bU_f.col(i1), nx_t, ny_t, nn, params, nvar);
+                SparseD Tau_matrix_visc = get_tau_visc(msh,brho_face,brhou_face,brhov_face,brhow_face,bE_face,params,c_v,i1,e2);
+
+                viscous_fluxes_face viscous_fluxes_face_out = flux_lin_visc_face(bU_f.col(i1),bU_fx.col(i1),bU_fy.col(i1),bU_fz.col(i1),params,nvar,m,invr_f);
+
+                SparseCD Av = (nx_k_c*viscous_fluxes_face_out.F + ny_k_c*viscous_fluxes_face_out.G);
+                SparseCD Am_c = flux_Jac.Am.cast<cdouble>();
+                SparseCD Ap_c = flux_Jac.Ap.cast<cdouble>();
+
+                SparseCD Tau_kron_c = (Tau_matrix_visc*nn_kron).cast<cdouble>();
+                SparseCD main_term = M0_c*r_fc*(Am_c - Ap_c + Av - Tau_kron_c);
+
+                stash_D(main_term,k1,k1);
+            }
+        } else if (e2 < 0)
+        {
+                SparseD nx_t = msh.face[i1].nx;
+                SparseD ny_t = msh.face[i1].ny;
+
+                SparseCD nx_k_c = (kron_sparse(I,msh.face[i1].nx)).cast<cdouble>();
+                SparseCD ny_k_c = (kron_sparse(I,msh.face[i1].ny)).cast<cdouble>();
+
+                flux_split_jacobians flux_Jac = flux_split(bU_f.col(i1), nx_t, ny_t, nn, params, nvar);
+                SparseD Tau_matrix_visc = get_tau_visc(msh,brho_face,brhou_face,brhov_face,brhow_face,bE_face,params,c_v,i1,e1);
+
+                viscous_fluxes_face viscous_fluxes_face_out = flux_lin_visc_face(bU_f.col(i1),bU_fx.col(i1),bU_fy.col(i1),bU_fz.col(i1),params,nvar,m,invr_f);
+
+                SparseCD Av = (nx_k_c*viscous_fluxes_face_out.F + ny_k_c*viscous_fluxes_face_out.G);
+                SparseCD Am_c = flux_Jac.Am.cast<cdouble>();
+                SparseCD Ap_c = flux_Jac.Ap.cast<cdouble>();
+
+                SparseCD Tau_kron_c = (Tau_matrix_visc*nn_kron).cast<cdouble>();
+                SparseCD main_term = M0_c*r_fc*(Am_c - Ap_c + Av - Tau_kron_c);
+
+                stash_D(main_term,k1,k1);
+        } else{
+            SparseD nx = msh.face[i1].nx;
+            SparseD ny = msh.face[i1].ny;
+
+            flux_split_jacobians flux_Jac = flux_split(bU_f.col(i1), nx, ny, nn, params, nvar);
+                
+            SparseD Tau_matrix_L = get_tau_visc(msh,brho_face,brhou_face,brhov_face,brhow_face,bE_face,params,c_v,i1,e1);
+            SparseD Tau_matrix_R = get_tau_visc(msh,brho_face,brhou_face,brhov_face,brhow_face,bE_face,params,c_v,i1,e2);
+            
+            SparseD main_term = ops.M0*r_f*(-2.0*(flux_Jac.Ap - flux_Jac.Am) - (Tau_matrix_L + Tau_matrix_R)*nn_kron);
+
+            stash_D(main_term.cast<cdouble>(),k1,k1);
+        }
+    }
+
+    result.D.setFromTriplets(D_triplets.begin(), D_triplets.end());
+    result.D.prune(cdouble(0.0, 0.0), 1e-14);
+
+    D_triplets.clear();
+    D_triplets.shrink_to_fit();
+
+    std::cout << "===== dg.D complete =====" << std::endl;
+    
+    return result;
 }
