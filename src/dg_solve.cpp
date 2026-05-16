@@ -35,8 +35,13 @@ SparseCD solveA(const SparseCD& b, const Msh& msh, const dg& dg_, const int nvar
         auto& local_trips = thread_triplets[tid];
         local_trips.reserve(b.nonZeros() * 4 / nthreads);
 
+        if (tid == 0)
+            std::cout << "solveA running on " << omp_get_num_threads() << " threads" << std::endl;
+        
         #pragma omp for schedule(dynamic)
         for (int i1 = 0; i1 < Ne; i1++) {
+            auto ta = std::chrono::high_resolution_clock::now();
+
             int j1 = 3 * Me * i1;
             int j3 = j1 + Me;
 
@@ -44,6 +49,7 @@ SparseCD solveA(const SparseCD& b, const Msh& msh, const dg& dg_, const int nvar
             const SparseCD& b_bot = b_bots[i1];
 
             SparseCD r = b_top - dg_.QB[i1] * (dg_.QiD[i1] * b_bot);
+            auto tb = std::chrono::high_resolution_clock::now();
 
             std::vector<int> ind;
             for (int col = 0; col < r.outerSize(); ++col)
@@ -68,8 +74,8 @@ SparseCD solveA(const SparseCD& b, const Msh& msh, const dg& dg_, const int nvar
                     r_dense(it.row(), jj) = it.value();
             }
 
-            Eigen::PartialPivLU<Eigen::MatrixXcd> iK_lu(Eigen::MatrixXcd(dg_.iK[i1]));
-            Eigen::MatrixXcd xx_top_dense = iK_lu.solve(r_dense);
+            Eigen::MatrixXcd xx_top_dense = dg_.iK_factors[i1]->solve(r_dense);
+            auto tc = std::chrono::high_resolution_clock::now();
 
             std::vector<Eigen::Triplet<Complex>> top_trips;
             for (int jj = 0; jj < nc; ++jj) {
@@ -80,16 +86,31 @@ SparseCD solveA(const SparseCD& b, const Msh& msh, const dg& dg_, const int nvar
             }
             SparseCD xx_top_sparse(Me, b.cols());
             xx_top_sparse.setFromTriplets(top_trips.begin(), top_trips.end());
+            auto td = std::chrono::high_resolution_clock::now();
 
             for (auto& t : top_trips)
                 local_trips.emplace_back(j1 + t.row(), t.col(), t.value());
 
             SparseCD xx_bot = dg_.QiD[i1] * (b_bot - dg_.QC[i1] * xx_top_sparse);
+            auto te = std::chrono::high_resolution_clock::now();
 
             for (int k = 0; k < xx_bot.outerSize(); ++k)
                 for (SparseCD::InnerIterator it(xx_bot, k); it; ++it)
                     if (std::abs(it.value()) > 1e-14)
                         local_trips.emplace_back(j3 + it.row(), it.col(), it.value());
+            auto tf = std::chrono::high_resolution_clock::now();
+
+            // #pragma omp critical
+            // {
+            //     std::cout << "Elem " << i1
+            //               << "  nc=" << nc
+            //               << "  r=" << std::chrono::duration<double>(tb-ta).count()
+            //               << "  solve=" << std::chrono::duration<double>(tc-tb).count()
+            //               << "  build_sparse=" << std::chrono::duration<double>(td-tc).count()
+            //               << "  bot_multiply=" << std::chrono::duration<double>(te-td).count()
+            //               << "  scatter=" << std::chrono::duration<double>(tf-te).count()
+            //               << " s\n";
+            // }
         }
     }
 
@@ -124,8 +145,10 @@ VectorCD solveA_vec(const VectorCD& b, const Msh& msh, const dg& dg_, const int 
 
         VectorCD r = b_top - dg_.QB[i1] * (dg_.QiD[i1] * b_bot);
 
-        Eigen::PartialPivLU<Eigen::MatrixXcd> iK_lu(Eigen::MatrixXcd(dg_.iK[i1]));
-        VectorCD xx_top = iK_lu.solve(r);
+        // Eigen::PartialPivLU<Eigen::MatrixXcd> iK_lu(Eigen::MatrixXcd(dg_.iK[i1]));
+        // VectorCD xx_top = iK_lu.solve(r);
+
+        VectorCD xx_top = dg_.iK_factors[i1]->solve(r);
 
         VectorCD xx_bot = dg_.QiD[i1] * (b_bot - dg_.QC[i1] * xx_top);
 
@@ -156,12 +179,12 @@ HDG_Result dg_solve(const VectorCD& src_e, const VectorCD& src_f,
         std::cout << "D - C*AinvB: " << std::chrono::duration<double>(t2 - t1).count() << " s\n";
     }  // AinvB freed here
 
-    SparseCD R;{
+    VectorCD R;{
          // R = src_f - C * solveA(src_e)
         auto t3 = std::chrono::high_resolution_clock::now();
         
         VectorCD AinvE = solveA_vec(src_e, msh, dg_, nvar);
-        VectorCD R = src_f - dg_.C * AinvE;
+        R = src_f - dg_.C * AinvE;
         auto t4 = std::chrono::high_resolution_clock::now();
         std::cout << "solveA(E) + R: " << std::chrono::duration<double>(t4 - t3).count() << " s\n";
     }
@@ -183,5 +206,7 @@ HDG_Result dg_solve(const VectorCD& src_e, const VectorCD& src_f,
 
     // std::cout << "Total dg_solve: " << std::chrono::duration<double>(t5 - t0).count() << " s\n";
 
+    result.K = K;
+    result.R = R;
     return result;
 }

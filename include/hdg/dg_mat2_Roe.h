@@ -27,6 +27,8 @@ struct dg
     std::vector<SparseCD>   QC;
     std::vector<SparseCD>   iK;
     std::vector<SparseCD>   QiD;
+
+    std::vector<std::unique_ptr<Eigen::PartialPivLU<Eigen::MatrixXcd>>> iK_factors;  // for solves
 };
 
 dg dg_mat_2Roe(const SimulationParams& params, const double omega,

@@ -25,7 +25,7 @@ Msh msh_test_grad(int p, const PhysMesh& phys_msh, const std::string& amr_dump_p
     amr = amr_refine(c0, amr);
     amr = amr_refine(c7, amr);
     amr = amr_refine(c5, amr);
-    //amr = amr_refine(c9, amr);
+    amr = amr_refine(c9, amr);
 
     if (!amr_dump_path.empty()) {
         dump_amr_leaves_csv(amr_dump_path, amr);

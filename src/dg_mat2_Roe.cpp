@@ -139,6 +139,7 @@ dg dg_mat_2Roe(const SimulationParams& params, const double omega,
     result.QB.resize(Ne);
     result.QC.resize(Ne);
     result.QiD.resize(Ne);
+    result.iK_factors.resize(Ne);
 
     const int rows_per_var = p + 1;
 
@@ -369,11 +370,15 @@ dg dg_mat_2Roe(const SimulationParams& params, const double omega,
         SparseCD iK = A - QB * QiD * QC;
         iK.prune(cdouble(0.0, 0.0), 1e-14);
 
+        auto iK_solver = std::make_unique<Eigen::PartialPivLU<Eigen::MatrixXcd>>();
+            iK_solver->compute(Eigen::MatrixXcd(iK));
+
         // Store sparse matrices only
         result.QB[i1]  = QB;
         result.QC[i1]  = QC;
         result.QiD[i1] = QiD;
         result.iK[i1]  = iK;
+        result.iK_factors[i1] = std::move(iK_solver);
     
         //std::cout << "  Cx/Cy/D build:     " << std::chrono::duration<double>(t2-t1).count() << " s\n";
         // std::cout << "  cast+stash+QB/QC:  " << std::chrono::duration<double>(t3-t2).count() << " s\n";
@@ -395,72 +400,90 @@ dg dg_mat_2Roe(const SimulationParams& params, const double omega,
     ////////////////////////// dg.B ////////////////////////////////////
     std::cout << "===== dg.B started =====" << std::endl;
 
-    std::vector<Eigen::Triplet<cdouble>> B_triplets;
-    B_triplets.reserve(static_cast<size_t>(15)* Me * Ne);
+    int nthreads = omp_get_max_threads();
+    std::vector<std::vector<Eigen::Triplet<cdouble>>> B_thread_triplets(nthreads);
 
-    for (int i1 = 0; i1 < Ne; ++i1)
+    #pragma omp parallel
     {
-        int j0 = 3*Me*i1;
+        int tid = omp_get_thread_num();
+        auto& local_trips = B_thread_triplets[tid];
+        local_trips.reserve(static_cast<size_t>(15) * Me * Ne / nthreads);
 
-        for (int f = 0; f < 12; ++f)
+        #pragma omp for schedule(dynamic)
+        for (int i1 = 0; i1 < Ne; ++i1)
         {
-            int i2 = msh.EtoF(f,i1);
-            if (i2 >= 0)
+            int j0 = 3*Me*i1;
+
+            for (int f = 0; f < 12; ++f)
             {
-                int k1 = Mf*(i2);
+                int i2 = msh.EtoF(f,i1);
+                if (i2 >= 0)
+                {
+                    int k1 = Mf*(i2);
 
-                SparseD nx = face_sgn(f) * kron_sparse(I, msh.face[i2].nx);
-                SparseD ny = face_sgn(f) * kron_sparse(I, msh.face[i2].ny);
-                SparseD r_f = kron_sparse(I,sd(msh.face[i2].r));
-                Eigen::VectorXd invr_f = msh.face[i2].invr;
-                
-                viscous_fluxes_face viscous_fluxes_face_out = flux_lin_visc_face(bU_f.col(i2),bU_fx.col(i2),bU_fy.col(i2),bU_fz.col(i2),params, nvar,m, invr_f);
+                    SparseD nx = face_sgn(f) * kron_sparse(I, msh.face[i2].nx);
+                    SparseD ny = face_sgn(f) * kron_sparse(I, msh.face[i2].ny);
+                    SparseD r_f = kron_sparse(I,sd(msh.face[i2].r));
+                    Eigen::VectorXd invr_f = msh.face[i2].invr;
+                    
+                    viscous_fluxes_face viscous_fluxes_face_out = flux_lin_visc_face(bU_f.col(i2),bU_fx.col(i2),bU_fy.col(i2),bU_fz.col(i2),params, nvar,m, invr_f);
 
-                SparseCD Fv = viscous_fluxes_face_out.F;
-                SparseCD Gv = viscous_fluxes_face_out.G;
+                    SparseCD Fv = viscous_fluxes_face_out.F;
+                    SparseCD Gv = viscous_fluxes_face_out.G;
 
-                SparseD nn = msh.face[i2].nn;
-                SparseD nx_t = face_sgn(f) * msh.face[i2].nx;
-                SparseD ny_t = face_sgn(f) * msh.face[i2].ny;
-                SparseD nn_kron = kron_sparse(I,msh.face[i2].nn);
+                    SparseD nn = msh.face[i2].nn;
+                    SparseD nx_t = face_sgn(f) * msh.face[i2].nx;
+                    SparseD ny_t = face_sgn(f) * msh.face[i2].ny;
+                    SparseD nn_kron = kron_sparse(I,msh.face[i2].nn);
 
-                flux_split_jacobians flux_Jac = flux_split(bU_f.col(i2),nx_t,ny_t,nn,params,nvar);
+                    flux_split_jacobians flux_Jac = flux_split(bU_f.col(i2),nx_t,ny_t,nn,params,nvar);
 
-                SparseD Tau_matrix_visc = get_tau_visc(msh,brho_face,brhou_face,brhov_face,brhow_face,bE_face,params,c_v,i2,i1);
+                    SparseD Tau_matrix_visc = get_tau_visc(msh,brho_face,brhou_face,brhov_face,brhow_face,bE_face,params,c_v,i2,i1);
 
-                SparseCD Av = (nx.cast<cdouble>()*(Fv) + ny.cast<cdouble>()*(Gv));
+                    SparseCD Av = (nx.cast<cdouble>()*(Fv) + ny.cast<cdouble>()*(Gv));
 
-                SparseCD Tau_matrix_visc_c = Tau_matrix_visc.cast<cdouble>();
-                SparseCD Am_c = flux_Jac.Am.cast<cdouble>();
-                SparseCD Ap_c = flux_Jac.Ap.cast<cdouble>();
-                SparseCD rf_c = r_f.cast<cdouble>(); 
-                SparseCD nn_kron_c = nn_kron.cast<cdouble>(); 
+                    SparseCD Tau_matrix_visc_c = Tau_matrix_visc.cast<cdouble>();
+                    SparseCD Am_c = flux_Jac.Am.cast<cdouble>();
+                    SparseCD Ap_c = flux_Jac.Ap.cast<cdouble>();
+                    SparseCD rf_c = r_f.cast<cdouble>(); 
+                    SparseCD nn_kron_c = nn_kron.cast<cdouble>(); 
 
-                SparseCD term = Lf_c[f]*(rf_c*(Av + 2.0*Am_c - Tau_matrix_visc_c*nn_kron_c));
-                SparseD gradient_term_x = -ops.L[f]*nx*r_f;
-                SparseD gradient_term_y = -ops.L[f]*ny*r_f;
+                    SparseCD term = Lf_c[f]*(rf_c*(Av + 2.0*Am_c - Tau_matrix_visc_c*nn_kron_c));
+                    SparseD gradient_term_x = -ops.L[f]*nx*r_f;
+                    SparseD gradient_term_y = -ops.L[f]*ny*r_f;
 
-                auto stash_B = [&](const SparseCD& B, int row_start, int col_start) {
-                    for (int k = 0; k < B.outerSize(); ++k)
-                        for (SparseCD::InnerIterator it(B, k); it; ++it)
-                            B_triplets.emplace_back(row_start + it.row(),
-                                                    col_start + it.col(),
-                                                    it.value());
-                };
+                    auto stash_B = [&](const SparseCD& B, int row_start, int col_start) {
+                        for (int k = 0; k < B.outerSize(); ++k)
+                            for (SparseCD::InnerIterator it(B, k); it; ++it)
+                                local_trips.emplace_back(row_start + it.row(),
+                                                        col_start + it.col(),
+                                                        it.value());
+                    };
 
-                stash_B(term,j0,k1);
-                stash_B(gradient_term_x.cast<cdouble>(),j0 + Me,k1);
-                stash_B(gradient_term_y.cast<cdouble>(),j0 + 2*Me,k1);
-
+                    stash_B(term,j0,k1);
+                    stash_B(gradient_term_x.cast<cdouble>(),j0 + Me,k1);
+                    stash_B(gradient_term_y.cast<cdouble>(),j0 + 2*Me,k1);
+                }
             }
         }
     }
-    
+
+    // Merge
+    std::vector<Eigen::Triplet<cdouble>> B_triplets;
+    size_t total_B = 0;
+    for (auto& v : B_thread_triplets) total_B += v.size();
+    B_triplets.reserve(total_B);
+    for (auto& v : B_thread_triplets)
+        B_triplets.insert(B_triplets.end(), v.begin(), v.end());
+
     result.B.setFromTriplets(B_triplets.begin(), B_triplets.end());
     result.B.prune(cdouble(0.0, 0.0), 1e-14);
 
     B_triplets.clear();
     B_triplets.shrink_to_fit();
+    B_thread_triplets.clear();
+    B_thread_triplets.shrink_to_fit();
+
     auto t3 = std::chrono::high_resolution_clock::now();
     std::cout << "dg.B: " << std::chrono::duration<double>(t3 - t2).count() << " s\n";
 
@@ -468,179 +491,213 @@ dg dg_mat_2Roe(const SimulationParams& params, const double omega,
     ////////////////////////// dg.C ////////////////////////////////////
     std::cout << "===== dg.C started =====" << std::endl;
 
-    std::vector<Eigen::Triplet<cdouble>> C_triplets;
-    C_triplets.reserve(static_cast<size_t>(15)* Me * Ne);
+   int nthreads_C = omp_get_max_threads();
+    std::vector<std::vector<Eigen::Triplet<cdouble>>> C_thread_triplets(nthreads_C);
 
-    for (int i1 = 0; i1 < Ne; ++i1){
-        int j0 = 3*Me*i1;
-        Eigen::MatrixXd invr = msh.elem[i1].invr;
-        viscous_fluxes viscous_fluxes_out = flux_lin_visc(bU.col(i1),bUx.col(i1),bUy.col(i1),bUz.col(i1),params,nvar,m,invr);
+    #pragma omp parallel
+    {
+        int tid = omp_get_thread_num();
+        auto& local_trips = C_thread_triplets[tid];
+        local_trips.reserve(static_cast<size_t>(15) * Me * Ne / nthreads_C);
 
-        for (int f = 0; f < 12; ++f)
-        {
-            int i2 = msh.EtoF(f,i1);
-            
-            if (i2 >= 0)
+        #pragma omp for schedule(dynamic)
+        for (int i1 = 0; i1 < Ne; ++i1) {
+            int j0 = 3*Me*i1;
+            Eigen::MatrixXd invr = msh.elem[i1].invr;
+            viscous_fluxes viscous_fluxes_out = flux_lin_visc(bU.col(i1),bUx.col(i1),bUy.col(i1),bUz.col(i1),params,nvar,m,invr);
+
+            for (int f = 0; f < 12; ++f)
             {
-                int k1 = Mf*(i2);
+                int i2 = msh.EtoF(f,i1);
+                
+                if (i2 >= 0)
+                {
+                    int k1 = Mf*(i2);
 
-                SparseD r_f = kron_sparse(I, sd(msh.face[i2].r));
-                SparseD nx = face_sgn(f) * kron_sparse(I, msh.face[i2].nx);
-                SparseD ny = face_sgn(f) * kron_sparse(I, msh.face[i2].ny);
+                    SparseD r_f = kron_sparse(I, sd(msh.face[i2].r));
+                    SparseD nx = face_sgn(f) * kron_sparse(I, msh.face[i2].nx);
+                    SparseD ny = face_sgn(f) * kron_sparse(I, msh.face[i2].ny);
 
-                SparseD nn_kron = kron_sparse(I, msh.face[i2].nn);
+                    SparseD nn_kron = kron_sparse(I, msh.face[i2].nn);
 
-                SparseD nn = msh.face[i2].nn;
-                SparseD nx_t = face_sgn(f) * msh.face[i2].nx;
-                SparseD ny_t = face_sgn(f) * msh.face[i2].ny;
+                    SparseD nn = msh.face[i2].nn;
+                    SparseD nx_t = face_sgn(f) * msh.face[i2].nx;
+                    SparseD ny_t = face_sgn(f) * msh.face[i2].ny;
 
-                flux_split_jacobians flux_Jac = flux_split(bU_f.col(i2),nx_t,ny_t,nn,params,nvar);
+                    flux_split_jacobians flux_Jac = flux_split(bU_f.col(i2),nx_t,ny_t,nn,params,nvar);
 
-                SparseD Tau_matrix_visc = get_tau_visc(msh,brho_face,brhou_face,brhov_face,brhow_face,bE_face,params,c_v,i2,i1);
+                    SparseD Tau_matrix_visc = get_tau_visc(msh,brho_face,brhou_face,brhov_face,brhow_face,bE_face,params,c_v,i2,i1);
 
-                auto stash_C = [&](const SparseCD& B, int row_start, int col_start) {
-                for (int k = 0; k < B.outerSize(); ++k)
-                    for (SparseCD::InnerIterator it(B, k); it; ++it)
-                        C_triplets.emplace_back(row_start + it.row(),
-                                                col_start + it.col(),
-                                                it.value());
-                };
+                    auto stash_C = [&](const SparseCD& B, int row_start, int col_start) {
+                        for (int k = 0; k < B.outerSize(); ++k)
+                            for (SparseCD::InnerIterator it(B, k); it; ++it)
+                                local_trips.emplace_back(row_start + it.row(),
+                                                        col_start + it.col(),
+                                                        it.value());
+                    };
 
-                // Assuming msh.FtoE is an Eigen::MatrixXi
-                if (msh.FtoE(0, i2) < 0 || msh.FtoE(1, i2) < 0) {
-                    // This is a boundary face
+                    if (msh.FtoE(0, i2) < 0 || msh.FtoE(1, i2) < 0) {
+                        if (msh.FtoE(0, i2) == -3 || msh.FtoE(1, i2) == -3)
+                        {
+                            SparseD wall_term = 2.0*ops.M0*r_f*BC*ops.T[f];
+                            stash_C(wall_term.cast<cdouble>(),k1,j0);
+                        } else {
+                            SparseD main_term = ops.M0*r_f*(flux_Jac.Ap + Tau_matrix_visc*nn_kron)*ops.T[f];
+                            SparseD x_term = ops.M0*r_f*(nx*ops.T[f]*viscous_fluxes_out.Fx + ny*ops.T[f]*viscous_fluxes_out.Gx);
+                            SparseD y_term = ops.M0*r_f*(nx*ops.T[f]*viscous_fluxes_out.Fy + ny*ops.T[f]*viscous_fluxes_out.Gy);
 
-                    if (msh.FtoE(0 , i2) == -3 || msh.FtoE(1, i2) == -3)
-                    {
-                        SparseD wall_term = 2.0*ops.M0*r_f*BC*ops.T[f];
-                        stash_C(wall_term.cast<cdouble>(),k1,j0);
+                            stash_C(main_term.cast<cdouble>(),k1,j0);
+                            stash_C(x_term.cast<cdouble>(),k1,j0+Me);
+                            stash_C(y_term.cast<cdouble>(),k1,j0+2*Me);
+                        }
                     } else {
-                        SparseD main_term = ops.M0*r_f*(flux_Jac.Ap + Tau_matrix_visc*nn_kron)*ops.T[f];
+                        SparseD main_term = ops.M0*r_f*(flux_Jac.Ap - flux_Jac.Am + Tau_matrix_visc*nn_kron)*ops.T[f];
                         SparseD x_term = ops.M0*r_f*(nx*ops.T[f]*viscous_fluxes_out.Fx + ny*ops.T[f]*viscous_fluxes_out.Gx);
                         SparseD y_term = ops.M0*r_f*(nx*ops.T[f]*viscous_fluxes_out.Fy + ny*ops.T[f]*viscous_fluxes_out.Gy);
-
+                        
                         stash_C(main_term.cast<cdouble>(),k1,j0);
                         stash_C(x_term.cast<cdouble>(),k1,j0+Me);
                         stash_C(y_term.cast<cdouble>(),k1,j0+2*Me);
                     }
-                } else {
-                    SparseD main_term = ops.M0*r_f*(flux_Jac.Ap - flux_Jac.Am + Tau_matrix_visc*nn_kron)*ops.T[f];
-                    SparseD x_term = ops.M0*r_f*(nx*ops.T[f]*viscous_fluxes_out.Fx + ny*ops.T[f]*viscous_fluxes_out.Gx);
-                    SparseD y_term = ops.M0*r_f*(nx*ops.T[f]*viscous_fluxes_out.Fy + ny*ops.T[f]*viscous_fluxes_out.Gy);
-                    
-                    stash_C(main_term.cast<cdouble>(),k1,j0);
-                    stash_C(x_term.cast<cdouble>(),k1,j0+Me);
-                    stash_C(y_term.cast<cdouble>(),k1,j0+2*Me);
-                }
-            }  
+                }  
+            }
         }
-
     }
+
+    // Merge
+    std::vector<Eigen::Triplet<cdouble>> C_triplets;
+    size_t total_C = 0;
+    for (auto& v : C_thread_triplets) total_C += v.size();
+    C_triplets.reserve(total_C);
+    for (auto& v : C_thread_triplets)
+        C_triplets.insert(C_triplets.end(), v.begin(), v.end());
+
     result.C.setFromTriplets(C_triplets.begin(), C_triplets.end());
     result.C.prune(cdouble(0.0, 0.0), 1e-14);
 
     C_triplets.clear();
     C_triplets.shrink_to_fit();
+    C_thread_triplets.clear();
+    C_thread_triplets.shrink_to_fit();
+    
     auto t4 = std::chrono::high_resolution_clock::now();
 
     std::cout << "===== dg.C complete =====" << std::endl;
     std::cout << "dg.C: " << std::chrono::duration<double>(t4 - t3).count() << " s\n";
 
     ////////////////////////// dg.D ////////////////////////////////////
-    std::vector<Eigen::Triplet<cdouble>> D_triplets;
-    D_triplets.reserve(static_cast<size_t>(15)* Mf * Nf);
+    int nthreads_D = omp_get_max_threads();
+    std::vector<std::vector<Eigen::Triplet<cdouble>>> D_thread_triplets(nthreads_D);
 
-    for (int i1 = 0; i1 < Nf; ++i1)
+    #pragma omp parallel
     {
-        int e1 = msh.FtoE(0,i1);
-        int e2 = msh.FtoE(1,i1);
-        
-        int k1 = Mf*i1;
+        int tid = omp_get_thread_num();
+        auto& local_trips = D_thread_triplets[tid];
+        local_trips.reserve(static_cast<size_t>(15) * Mf * Nf / nthreads_D);
 
-        SparseD r_f = kron_sparse(I, sd(msh.face[i1].r));
-        Eigen::VectorXd invr_f = msh.face[i1].invr;
-
-        SparseD nn = msh.face[i1].nn;
-        SparseD nn_kron = kron_sparse(I, nn);
-
-        SparseCD r_fc = r_f.cast<cdouble>();
-
-        auto stash_D = [&](const SparseCD& B, int row_start, int col_start) {
-        for (int k = 0; k < B.outerSize(); ++k)
-            for (SparseCD::InnerIterator it(B, k); it; ++it)
-                D_triplets.emplace_back(row_start + it.row(),
-                                        col_start + it.col(),
-                                        it.value());
-        };
-
-        if (e1 < 0)
+        #pragma omp for schedule(dynamic)
+        for (int i1 = 0; i1 < Nf; ++i1)
         {
-            if (e1 == -3){
-                SparseCD main_term = -2.0*r_fc*M0_c;
-                stash_D(main_term,k1,k1);
-            } else {
-                SparseD nx_t = -msh.face[i1].nx;
-                SparseD ny_t = -msh.face[i1].ny;
-
-                SparseCD nx_k_c = (-1.0*kron_sparse(I,msh.face[i1].nx)).cast<cdouble>();
-                SparseCD ny_k_c = (-1.0*kron_sparse(I,msh.face[i1].ny)).cast<cdouble>();
-
-                flux_split_jacobians flux_Jac = flux_split(bU_f.col(i1), nx_t, ny_t, nn, params, nvar);
-                SparseD Tau_matrix_visc = get_tau_visc(msh,brho_face,brhou_face,brhov_face,brhow_face,bE_face,params,c_v,i1,e2);
-
-                viscous_fluxes_face viscous_fluxes_face_out = flux_lin_visc_face(bU_f.col(i1),bU_fx.col(i1),bU_fy.col(i1),bU_fz.col(i1),params,nvar,m,invr_f);
-
-                SparseCD Av = (nx_k_c*viscous_fluxes_face_out.F + ny_k_c*viscous_fluxes_face_out.G);
-                SparseCD Am_c = flux_Jac.Am.cast<cdouble>();
-                SparseCD Ap_c = flux_Jac.Ap.cast<cdouble>();
-
-                SparseCD Tau_kron_c = (Tau_matrix_visc*nn_kron).cast<cdouble>();
-                SparseCD main_term = M0_c*r_fc*(Am_c - Ap_c + Av - Tau_kron_c);
-
-                stash_D(main_term,k1,k1);
-            }
-        } else if (e2 < 0)
-        {
-                SparseD nx_t = msh.face[i1].nx;
-                SparseD ny_t = msh.face[i1].ny;
-
-                SparseCD nx_k_c = (kron_sparse(I,msh.face[i1].nx)).cast<cdouble>();
-                SparseCD ny_k_c = (kron_sparse(I,msh.face[i1].ny)).cast<cdouble>();
-
-                flux_split_jacobians flux_Jac = flux_split(bU_f.col(i1), nx_t, ny_t, nn, params, nvar);
-                SparseD Tau_matrix_visc = get_tau_visc(msh,brho_face,brhou_face,brhov_face,brhow_face,bE_face,params,c_v,i1,e1);
-
-                viscous_fluxes_face viscous_fluxes_face_out = flux_lin_visc_face(bU_f.col(i1),bU_fx.col(i1),bU_fy.col(i1),bU_fz.col(i1),params,nvar,m,invr_f);
-
-                SparseCD Av = (nx_k_c*viscous_fluxes_face_out.F + ny_k_c*viscous_fluxes_face_out.G);
-                SparseCD Am_c = flux_Jac.Am.cast<cdouble>();
-                SparseCD Ap_c = flux_Jac.Ap.cast<cdouble>();
-
-                SparseCD Tau_kron_c = (Tau_matrix_visc*nn_kron).cast<cdouble>();
-                SparseCD main_term = M0_c*r_fc*(Am_c - Ap_c + Av - Tau_kron_c);
-
-                stash_D(main_term,k1,k1);
-        } else{
-            SparseD nx = msh.face[i1].nx;
-            SparseD ny = msh.face[i1].ny;
-
-            flux_split_jacobians flux_Jac = flux_split(bU_f.col(i1), nx, ny, nn, params, nvar);
-                
-            SparseD Tau_matrix_L = get_tau_visc(msh,brho_face,brhou_face,brhov_face,brhow_face,bE_face,params,c_v,i1,e1);
-            SparseD Tau_matrix_R = get_tau_visc(msh,brho_face,brhou_face,brhov_face,brhow_face,bE_face,params,c_v,i1,e2);
+            int e1 = msh.FtoE(0,i1);
+            int e2 = msh.FtoE(1,i1);
             
-            SparseD main_term = ops.M0*r_f*(-2.0*(flux_Jac.Ap - flux_Jac.Am) - (Tau_matrix_L + Tau_matrix_R)*nn_kron);
+            int k1 = Mf*i1;
 
-            stash_D(main_term.cast<cdouble>(),k1,k1);
+            SparseD r_f = kron_sparse(I, sd(msh.face[i1].r));
+            Eigen::VectorXd invr_f = msh.face[i1].invr;
+
+            SparseD nn = msh.face[i1].nn;
+            SparseD nn_kron = kron_sparse(I, nn);
+
+            SparseCD r_fc = r_f.cast<cdouble>();
+
+            auto stash_D = [&](const SparseCD& B, int row_start, int col_start) {
+                for (int k = 0; k < B.outerSize(); ++k)
+                    for (SparseCD::InnerIterator it(B, k); it; ++it)
+                        local_trips.emplace_back(row_start + it.row(),
+                                                col_start + it.col(),
+                                                it.value());
+            };
+
+            if (e1 < 0)
+            {
+                if (e1 == -3){
+                    SparseCD main_term = -2.0*r_fc*M0_c;
+                    stash_D(main_term,k1,k1);
+                } else {
+                    SparseD nx_t = -msh.face[i1].nx;
+                    SparseD ny_t = -msh.face[i1].ny;
+
+                    SparseCD nx_k_c = (-1.0*kron_sparse(I,msh.face[i1].nx)).cast<cdouble>();
+                    SparseCD ny_k_c = (-1.0*kron_sparse(I,msh.face[i1].ny)).cast<cdouble>();
+
+                    flux_split_jacobians flux_Jac = flux_split(bU_f.col(i1), nx_t, ny_t, nn, params, nvar);
+                    SparseD Tau_matrix_visc = get_tau_visc(msh,brho_face,brhou_face,brhov_face,brhow_face,bE_face,params,c_v,i1,e2);
+
+                    viscous_fluxes_face viscous_fluxes_face_out = flux_lin_visc_face(bU_f.col(i1),bU_fx.col(i1),bU_fy.col(i1),bU_fz.col(i1),params,nvar,m,invr_f);
+
+                    SparseCD Av = (nx_k_c*viscous_fluxes_face_out.F + ny_k_c*viscous_fluxes_face_out.G);
+                    SparseCD Am_c = flux_Jac.Am.cast<cdouble>();
+                    SparseCD Ap_c = flux_Jac.Ap.cast<cdouble>();
+
+                    SparseCD Tau_kron_c = (Tau_matrix_visc*nn_kron).cast<cdouble>();
+                    SparseCD main_term = M0_c*r_fc*(Am_c - Ap_c + Av - Tau_kron_c);
+
+                    stash_D(main_term,k1,k1);
+                }
+            } else if (e2 < 0)
+            {
+                    SparseD nx_t = msh.face[i1].nx;
+                    SparseD ny_t = msh.face[i1].ny;
+
+                    SparseCD nx_k_c = (kron_sparse(I,msh.face[i1].nx)).cast<cdouble>();
+                    SparseCD ny_k_c = (kron_sparse(I,msh.face[i1].ny)).cast<cdouble>();
+
+                    flux_split_jacobians flux_Jac = flux_split(bU_f.col(i1), nx_t, ny_t, nn, params, nvar);
+                    SparseD Tau_matrix_visc = get_tau_visc(msh,brho_face,brhou_face,brhov_face,brhow_face,bE_face,params,c_v,i1,e1);
+
+                    viscous_fluxes_face viscous_fluxes_face_out = flux_lin_visc_face(bU_f.col(i1),bU_fx.col(i1),bU_fy.col(i1),bU_fz.col(i1),params,nvar,m,invr_f);
+
+                    SparseCD Av = (nx_k_c*viscous_fluxes_face_out.F + ny_k_c*viscous_fluxes_face_out.G);
+                    SparseCD Am_c = flux_Jac.Am.cast<cdouble>();
+                    SparseCD Ap_c = flux_Jac.Ap.cast<cdouble>();
+
+                    SparseCD Tau_kron_c = (Tau_matrix_visc*nn_kron).cast<cdouble>();
+                    SparseCD main_term = M0_c*r_fc*(Am_c - Ap_c + Av - Tau_kron_c);
+
+                    stash_D(main_term,k1,k1);
+            } else {
+                SparseD nx = msh.face[i1].nx;
+                SparseD ny = msh.face[i1].ny;
+
+                flux_split_jacobians flux_Jac = flux_split(bU_f.col(i1), nx, ny, nn, params, nvar);
+                    
+                SparseD Tau_matrix_L = get_tau_visc(msh,brho_face,brhou_face,brhov_face,brhow_face,bE_face,params,c_v,i1,e1);
+                SparseD Tau_matrix_R = get_tau_visc(msh,brho_face,brhou_face,brhov_face,brhow_face,bE_face,params,c_v,i1,e2);
+                
+                SparseD main_term = ops.M0*r_f*(-2.0*(flux_Jac.Ap - flux_Jac.Am) - (Tau_matrix_L + Tau_matrix_R)*nn_kron);
+
+                stash_D(main_term.cast<cdouble>(),k1,k1);
+            }
         }
     }
+
+    // Merge
+    std::vector<Eigen::Triplet<cdouble>> D_triplets;
+    size_t total_D = 0;
+    for (auto& v : D_thread_triplets) total_D += v.size();
+    D_triplets.reserve(total_D);
+    for (auto& v : D_thread_triplets)
+        D_triplets.insert(D_triplets.end(), v.begin(), v.end());
 
     result.D.setFromTriplets(D_triplets.begin(), D_triplets.end());
     result.D.prune(cdouble(0.0, 0.0), 1e-14);
 
     D_triplets.clear();
     D_triplets.shrink_to_fit();
-
+    D_thread_triplets.clear();
+    D_thread_triplets.shrink_to_fit();
+    
     std::cout << "===== dg.D complete =====" << std::endl;
     auto t5 = std::chrono::high_resolution_clock::now();
 

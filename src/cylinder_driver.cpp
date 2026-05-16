@@ -42,6 +42,18 @@ static Eigen::SparseMatrix<double> kron_sparse(const Eigen::SparseMatrix<double>
     return result;
 }
 
+void save_vector_complex_binary(const std::string& filepath, const Eigen::VectorXcd& v) {
+    std::ofstream out(filepath, std::ios::binary);
+    double n = static_cast<double>(v.size());
+    out.write(reinterpret_cast<const char*>(&n), sizeof(double));
+    for (int i = 0; i < v.size(); ++i) {
+        double re = v(i).real();
+        double im = v(i).imag();
+        out.write(reinterpret_cast<const char*>(&re), sizeof(double));
+        out.write(reinterpret_cast<const char*>(&im), sizeof(double));
+    }
+}
+
 void save_sparse_complex_binary(const Eigen::SparseMatrix<std::complex<double>>& A,
                                  const std::string& filepath) {
     std::ofstream f(filepath, std::ios::binary);
@@ -550,7 +562,7 @@ int main(){
     std::cout << "DG matrix assembly: "
             << std::chrono::duration<double>(t_end - t_start).count() << " s" << std::endl;
     // std::cout << "============ Saving matrices for MATLAB comparison ============" << std::endl;
-    // const std::string out = OUTPUT_DIR;
+    const std::string out = OUTPUT_DIR;
     // save_sparse_complex_binary(dg_out.A, out + "/dg_A_cpp.bin");
     // save_sparse_complex_binary(dg_out.B, out + "/dg_B_cpp.bin");
     // save_sparse_complex_binary(dg_out.C, out + "/dg_C_cpp.bin");
@@ -618,5 +630,9 @@ int main(){
 
     HDG_Result result_hdg = dg_solve(src_e_cd,src_f_cd,msh,dg_out,nvar);
 
+    
+    save_sparse_complex_binary(result_hdg.K, out + "/K_cpp.bin");
+    save_vector_complex_binary(out + "/R_cpp.bin",result_hdg.R);
+    std::cout << "Saved K and R to " << out << "\n";
 
 }
