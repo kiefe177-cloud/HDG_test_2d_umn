@@ -11,228 +11,177 @@ using SparseD   = Eigen::SparseMatrix<double>;
 using VectorCD  = Eigen::VectorXcd;
 using MatrixCD  = Eigen::MatrixXcd;
 
-// Apply QiD = dg.D_factors[e]^{-1} to a complex vector by splitting real/imag.
-// (D_factors holds a real SparseLU; if it ever becomes complex, this collapses
-// to a single .solve(col) call.)
-VectorCD apply_QiD(const dg& dg_, int e, const VectorCD& col)
-{
-    Eigen::VectorXd sr = dg_.D_factors[e]->solve(col.real().eval());
-    Eigen::VectorXd si = dg_.D_factors[e]->solve(col.imag().eval());
-    VectorCD out(col.size());
-    out.real() = sr;
-    out.imag() = si;
-    return out;
-}
-
-// ---------------------------------------------------------------------------
-// solveA (sparse RHS): applies A^{-1} to a sparse multi-column RHS.
-// Used during K-assembly where the RHS is dg.B and most columns are zero.
-//
-// Per-element layout: each element owns 3*Me consecutive rows, split as
-//   [j1, j1+Me)        -> "upper" block (Me rows)         e.g. volume DOFs
-//   [j1+Me, j1+3*Me)   -> "lower" block (2*Me rows)       e.g. element-face DOFs
-// ---------------------------------------------------------------------------
 SparseCD solveA(const SparseCD& b, const Msh& msh, const dg& dg_, const int nvar)
 {
-    const int p     = msh.elem[0].p;                  // "fix later" per the MATLAB
-    const int Ne    = static_cast<int>(msh.elem.size());
-    const int Me    = nvar * (p + 1) * (p + 1);
-    const int n_rhs = static_cast<int>(b.cols());
+    int p = msh.elem[0].p;
+    int Ne = msh.elem.size();
+    int Me = nvar * (p+1) * (p+1);
 
-    auto t0 = std::chrono::high_resolution_clock::now();
-
-    // Result holders, two blocks per element (upper Me rows, lower 2*Me rows)
-    std::vector<MatrixCD> xx(2 * Ne);
-
-    for (int e = 0; e < Ne; ++e) {
-        const int j1 = 3 * Me * e;
-        const int j2 = j1 + Me;            // [j1, j2)  -> upper Me rows
-        const int j3 = j2;                 // [j3, j3 + 2*Me) -> lower 2*Me rows
-
-        // Extract b(j1:j2,:) and b(j3:j4,:) as dense blocks.
-        // b is sparse; iterate nonzeros rather than densifying the whole thing.
-        MatrixCD b_top = MatrixCD::Zero(Me,     n_rhs);
-        MatrixCD b_bot = MatrixCD::Zero(2 * Me, n_rhs);
-
-        for (int k = 0; k < n_rhs; ++k) {
-            for (SparseCD::InnerIterator it(b, k); it; ++it) {
-                const int row = static_cast<int>(it.row());
-                if      (row >= j1 && row < j2)            b_top(row - j1, k) = it.value();
-                else if (row >= j3 && row < j3 + 2 * Me)   b_bot(row - j3, k) = it.value();
-            }
-        }
-
-        // QiD \ b_bot  (the inner "D" solve), column by column
-        MatrixCD QiD_b_bot(2 * Me, n_rhs);
-        for (int k = 0; k < n_rhs; ++k)
-            QiD_b_bot.col(k) = apply_QiD(dg_, e, b_bot.col(k));
-
-        // r = b_top - QB[e] * QiD_b_bot
-        MatrixCD r = b_top - MatrixCD(dg_.QB[e]) * QiD_b_bot;
-
-        // Sparse-RHS optimization: solve iK \ r only on nonzero columns
-        std::vector<int> nz_cols;
-        nz_cols.reserve(n_rhs);
-        for (int k = 0; k < n_rhs; ++k) {
-            if (r.col(k).cwiseAbs().sum() != 0.0) nz_cols.push_back(k);
-        }
-
-        MatrixCD upper = MatrixCD::Zero(Me, n_rhs);
-
-        if (!nz_cols.empty()) {
-            MatrixCD r_sub(Me, static_cast<int>(nz_cols.size()));
-            for (size_t kk = 0; kk < nz_cols.size(); ++kk)
-                r_sub.col(static_cast<int>(kk)) = r.col(nz_cols[kk]);
-
-            // TODO: cache these factorizations alongside dg.Ik to avoid
-            // refactoring on every solveA call.
-            Eigen::SparseLU<SparseCD> iK_solver;
-            iK_solver.compute(dg_.Ik[e]);
-            MatrixCD tt = iK_solver.solve(r_sub);
-
-            for (size_t kk = 0; kk < nz_cols.size(); ++kk)
-                upper.col(nz_cols[kk]) = tt.col(static_cast<int>(kk));
-        }
-
-        xx[2 * e] = upper;
-
-        // lower = QiD \ (b_bot - QC * upper)
-        MatrixCD rhs_lower = b_bot - MatrixCD(dg_.QC[e]) * upper;
-        MatrixCD lower(2 * Me, n_rhs);
-        for (int k = 0; k < n_rhs; ++k)
-            lower.col(k) = apply_QiD(dg_, e, rhs_lower.col(k));
-
-        xx[2 * e + 1] = lower;
+    // Pre-extract each element's rows from b (middleRows is not thread-safe on sparse)
+    std::vector<SparseCD> b_tops(Ne), b_bots(Ne);
+    for (int i1 = 0; i1 < Ne; i1++) {
+        int j1 = 3 * Me * i1;
+        int j3 = j1 + Me;
+        b_tops[i1] = b.middleRows(j1, Me);
+        b_bots[i1] = b.middleRows(j3, 2 * Me);
     }
 
-    // Stitch the per-element blocks into one global sparse matrix (cell2mat)
-    const int rows_total = 3 * Me * Ne;
-    SparseCD x(rows_total, n_rhs);
+    int nthreads = omp_get_max_threads();
+    std::vector<std::vector<Eigen::Triplet<Complex>>> thread_triplets(nthreads);
 
-    std::vector<Eigen::Triplet<Complex>> trips;
-    trips.reserve(static_cast<size_t>(rows_total) * n_rhs / 8);  // rough guess
+    #pragma omp parallel
+    {
+        int tid = omp_get_thread_num();
+        auto& local_trips = thread_triplets[tid];
+        local_trips.reserve(b.nonZeros() * 4 / nthreads);
 
-    for (int e = 0; e < Ne; ++e) {
-        const int row0_top = 3 * Me * e;
-        const int row0_bot = row0_top + Me;
-        const MatrixCD& top = xx[2 * e];
-        const MatrixCD& bot = xx[2 * e + 1];
+        #pragma omp for schedule(dynamic)
+        for (int i1 = 0; i1 < Ne; i1++) {
+            int j1 = 3 * Me * i1;
+            int j3 = j1 + Me;
 
-        for (int k = 0; k < n_rhs; ++k) {
-            for (int i = 0; i < Me; ++i) {
-                const Complex v = top(i, k);
-                if (v != Complex(0.0)) trips.emplace_back(row0_top + i, k, v);
+            const SparseCD& b_top = b_tops[i1];
+            const SparseCD& b_bot = b_bots[i1];
+
+            SparseCD r = b_top - dg_.QB[i1] * (dg_.QiD[i1] * b_bot);
+
+            std::vector<int> ind;
+            for (int col = 0; col < r.outerSize(); ++col)
+                if (SparseCD::InnerIterator(r, col))
+                    ind.push_back(col);
+
+            if (ind.empty()) {
+                SparseCD xx_bot = dg_.QiD[i1] * b_bot;
+                for (int k = 0; k < xx_bot.outerSize(); ++k)
+                    for (SparseCD::InnerIterator it(xx_bot, k); it; ++it)
+                        if (std::abs(it.value()) > 1e-14)
+                            local_trips.emplace_back(j3 + it.row(), it.col(), it.value());
+                continue;
             }
-            for (int i = 0; i < 2 * Me; ++i) {
-                const Complex v = bot(i, k);
-                if (v != Complex(0.0)) trips.emplace_back(row0_bot + i, k, v);
+
+            int nc = static_cast<int>(ind.size());
+
+            Eigen::MatrixXcd r_dense(Me, nc);
+            for (int jj = 0; jj < nc; ++jj) {
+                r_dense.col(jj).setZero();
+                for (SparseCD::InnerIterator it(r, ind[jj]); it; ++it)
+                    r_dense(it.row(), jj) = it.value();
             }
+
+            Eigen::PartialPivLU<Eigen::MatrixXcd> iK_lu(Eigen::MatrixXcd(dg_.iK[i1]));
+            Eigen::MatrixXcd xx_top_dense = iK_lu.solve(r_dense);
+
+            std::vector<Eigen::Triplet<Complex>> top_trips;
+            for (int jj = 0; jj < nc; ++jj) {
+                int col = ind[jj];
+                for (int row = 0; row < Me; ++row)
+                    if (std::abs(xx_top_dense(row, jj)) > 1e-14)
+                        top_trips.emplace_back(row, col, xx_top_dense(row, jj));
+            }
+            SparseCD xx_top_sparse(Me, b.cols());
+            xx_top_sparse.setFromTriplets(top_trips.begin(), top_trips.end());
+
+            for (auto& t : top_trips)
+                local_trips.emplace_back(j1 + t.row(), t.col(), t.value());
+
+            SparseCD xx_bot = dg_.QiD[i1] * (b_bot - dg_.QC[i1] * xx_top_sparse);
+
+            for (int k = 0; k < xx_bot.outerSize(); ++k)
+                for (SparseCD::InnerIterator it(xx_bot, k); it; ++it)
+                    if (std::abs(it.value()) > 1e-14)
+                        local_trips.emplace_back(j3 + it.row(), it.col(), it.value());
         }
     }
-    x.setFromTriplets(trips.begin(), trips.end());
 
-    auto t1 = std::chrono::high_resolution_clock::now();
-    std::cout << "Solve A done, "
-              << std::chrono::duration<double>(t1 - t0).count() << " s\n";
+    // Merge all thread-local triplets
+    size_t total = 0;
+    for (auto& v : thread_triplets) total += v.size();
+    std::vector<Eigen::Triplet<Complex>> triplets;
+    triplets.reserve(total);
+    for (auto& v : thread_triplets)
+        triplets.insert(triplets.end(), v.begin(), v.end());
 
+    SparseCD x(b.rows(), b.cols());
+    x.setFromTriplets(triplets.begin(), triplets.end());
     return x;
 }
 
-// ---------------------------------------------------------------------------
-// solveA (dense RHS): applies A^{-1} to a single dense vector.
-// Used for src_e and the back-substitution RHS. No sparse-column trickery
-// since a dense vector has no all-zero "columns" to exploit.
-// ---------------------------------------------------------------------------
-VectorCD solveA(const VectorCD& b, const Msh& msh, const dg& dg_, int nvar)
+VectorCD solveA_vec(const VectorCD& b, const Msh& msh, const dg& dg_, const int nvar)
 {
-    const int p  = msh.elem[0].p;
-    const int Ne = static_cast<int>(msh.elem.size());
-    const int Me = nvar * (p + 1) * (p + 1);
+    int p = msh.elem[0].p;
+    int Ne = msh.elem.size();
+    int Me = nvar * (p+1) * (p+1);
 
-    auto t0 = std::chrono::high_resolution_clock::now();
+    VectorCD x = VectorCD::Zero(b.rows());
 
-    VectorCD x(3 * Me * Ne);
+    #pragma omp parallel for schedule(dynamic)
+    for (int i1 = 0; i1 < Ne; i1++) {
+        int j1 = 3 * Me * i1;
+        int j3 = j1 + Me;
 
-    for (int e = 0; e < Ne; ++e) {
-        const int j1 = 3 * Me * e;
-        const int j3 = j1 + Me;
-
-        // Slice b into top (Me) and bottom (2*Me) pieces
         VectorCD b_top = b.segment(j1, Me);
         VectorCD b_bot = b.segment(j3, 2 * Me);
 
-        // QiD \ b_bot  (the inner "D" solve)
-        VectorCD QiD_b_bot = apply_QiD(dg_, e, b_bot);
+        VectorCD r = b_top - dg_.QB[i1] * (dg_.QiD[i1] * b_bot);
 
-        // r = b_top - QB[e] * QiD_b_bot
-        VectorCD r = b_top - MatrixCD(dg_.QB[e]) * QiD_b_bot;
+        Eigen::PartialPivLU<Eigen::MatrixXcd> iK_lu(Eigen::MatrixXcd(dg_.iK[i1]));
+        VectorCD xx_top = iK_lu.solve(r);
 
-        // upper = iK[e] \ r
-        // TODO: cache these factorizations alongside dg.Ik.
-        Eigen::SparseLU<SparseCD> iK_solver;
-        iK_solver.compute(dg_.Ik[e]);
-        VectorCD upper = iK_solver.solve(r);
+        VectorCD xx_bot = dg_.QiD[i1] * (b_bot - dg_.QC[i1] * xx_top);
 
-        // lower = QiD \ (b_bot - QC[e] * upper)
-        VectorCD lower = apply_QiD(dg_, e,
-                                   b_bot - MatrixCD(dg_.QC[e]) * upper);
-
-        x.segment(j1, Me)     = upper;
-        x.segment(j3, 2 * Me) = lower;
+        x.segment(j1, Me)     = xx_top;
+        x.segment(j3, 2 * Me) = xx_bot;
     }
-
-    auto t1 = std::chrono::high_resolution_clock::now();
-    std::cout << "Solve A (dense) done, "
-              << std::chrono::duration<double>(t1 - t0).count() << " s\n";
-
     return x;
 }
 
 }  // anonymous namespace
 
-
-// ---------------------------------------------------------------------------
-// dg_solve: HDG Schur complement solve
-//
-//   [ A  B ] [ U   ]   [ E ]
-//   [ C  D ] [ U^ ] = [ F ]
-//
-//   K  = D - C A^{-1} B
-//   R  = F - C A^{-1} E
-//   U^ = K^{-1} R                  (trace solve)
-//   U  = A^{-1} ( E - B U^ )       (back-substitution)
-// ---------------------------------------------------------------------------
-HDG_Result dg_solve(const Eigen::VectorXcd& src_e,
-                    const Eigen::VectorXcd& src_f,
+HDG_Result dg_solve(const VectorCD& src_e, const VectorCD& src_f,
                     const Msh& msh, const dg& dg_, int nvar)
 {
     HDG_Result result;
 
-    // K = D - C * (A^{-1} B) — sparse overload because dg.B is sparse
-    SparseCD AinvB = solveA(dg_.B, msh, dg_, nvar);
-    SparseCD K     = dg_.D - dg_.C * AinvB;
-
-    // R = src_f - C * (A^{-1} src_e) — dense overload; sparse * dense = dense
-    VectorCD AinvE = solveA(src_e, msh, dg_, nvar);
-    VectorCD R     = src_f - dg_.C * AinvE;
-
-    // Trace solve
     auto t0 = std::chrono::high_resolution_clock::now();
-    Eigen::SparseLU<SparseCD> K_solver;
-    K_solver.analyzePattern(K);
-    K_solver.factorize(K);
-    if (K_solver.info() != Eigen::Success) {
-        std::cerr << "Schur complement factorization failed\n";
-        return result;
-    }
-    result.u_f = K_solver.solve(R);
-    auto t1 = std::chrono::high_resolution_clock::now();
-    std::cout << "Schur complement solve, "
-              << std::chrono::duration<double>(t1 - t0).count() << " s\n";
 
-    // u_e = A^{-1} ( src_e - B * u_f )
-    VectorCD rhs_e = src_e - dg_.B * result.u_f;
-    result.u_e = solveA(rhs_e, msh, dg_, nvar);
+    // K = D - C * solveA(B)
+    SparseCD K;
+    {
+        SparseCD AinvB = solveA(dg_.B, msh, dg_, nvar);
+        auto t1 = std::chrono::high_resolution_clock::now();
+        std::cout << "solveA(B): " << std::chrono::duration<double>(t1 - t0).count() << " s\n";
+
+        K = dg_.D - dg_.C * AinvB;
+        auto t2 = std::chrono::high_resolution_clock::now();
+        std::cout << "D - C*AinvB: " << std::chrono::duration<double>(t2 - t1).count() << " s\n";
+    }  // AinvB freed here
+
+    SparseCD R;{
+         // R = src_f - C * solveA(src_e)
+        auto t3 = std::chrono::high_resolution_clock::now();
+        
+        VectorCD AinvE = solveA_vec(src_e, msh, dg_, nvar);
+        VectorCD R = src_f - dg_.C * AinvE;
+        auto t4 = std::chrono::high_resolution_clock::now();
+        std::cout << "solveA(E) + R: " << std::chrono::duration<double>(t4 - t3).count() << " s\n";
+    }
+
+    // // Trace solve: u_f = K \ R
+    // Eigen::SparseLU<SparseCD> K_solver;
+    // K_solver.compute(K);
+    // if (K_solver.info() != Eigen::Success)
+    //     std::cerr << "SparseLU factorization failed on global K\n";
+    // result.u_f = K_solver.solve(R);
+    // auto t4 = std::chrono::high_resolution_clock::now();
+    // std::cout << "K\\R: " << std::chrono::duration<double>(t4 - t3).count() << " s\n";
+
+    // // Back-sub: u_e = solveA(src_e - B * u_f)
+    // VectorCD rhs_back = src_e - dg_.B * result.u_f;
+    // result.u_e = solveA_vec(rhs_back, msh, dg_, nvar);
+    // auto t5 = std::chrono::high_resolution_clock::now();
+    // std::cout << "Back-sub: " << std::chrono::duration<double>(t5 - t4).count() << " s\n";
+
+    // std::cout << "Total dg_solve: " << std::chrono::duration<double>(t5 - t0).count() << " s\n";
 
     return result;
 }

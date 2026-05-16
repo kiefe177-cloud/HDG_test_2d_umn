@@ -24,6 +24,8 @@ elliptic solve
 #include <complex>
 #include <fstream>
 #include <unsupported/Eigen/KroneckerProduct>
+#include <omp.h>
+#include <Eigen/Core>
 
 #include "hdg/all.h" // Main driver files
 #include "hdg/mesh_utils.h"
@@ -72,6 +74,13 @@ void save_sparse_complex_binary(const Eigen::SparseMatrix<std::complex<double>>&
 }
 
 int main(){
+    #ifdef NDEBUG
+        std::cout << "Build: Release" << std::endl;
+    #else
+        std::cout << "Build: Debug" << std::endl;
+    #endif
+    Eigen::setNbThreads(1);
+    omp_set_num_threads(omp_get_num_procs());
     {
         Eigen::SparseMatrix<double> _dbg_sp(1, 1);
         Eigen::MatrixXd _dbg_dense(1, 1);
@@ -528,12 +537,18 @@ int main(){
     save_csv(std::string(OUTPUT_DIR) + "/bUy_f.csv",grad_variables.bUy_f);
     save_csv(std::string(OUTPUT_DIR) + "/bUz_f.csv",grad_variables.bUz_f);
 
-    
-    std::cout <<"============ Creating DG Matrices ============"<< std::endl;
-    dg dg_out = dg_mat_2Roe(params, omega,msh,nvar,op1,op2, bU, grad_variables.bUx, grad_variables.bUy, grad_variables.bUz,
+    std::cout << "============ Creating DG Matrices ============" << std::endl;
+    std::cout << "Using " << omp_get_max_threads() << " OpenMP threads" << std::endl;
+
+    auto t_start = std::chrono::high_resolution_clock::now();
+
+    dg dg_out = dg_mat_2Roe(params, omega, msh, nvar, op1, op2, bU, grad_variables.bUx, grad_variables.bUy, grad_variables.bUz,
                             bU_f, grad_variables.bUx_f, grad_variables.bUy_f, grad_variables.bUz_f,
                             m);
 
+    auto t_end = std::chrono::high_resolution_clock::now();
+    std::cout << "DG matrix assembly: "
+            << std::chrono::duration<double>(t_end - t_start).count() << " s" << std::endl;
     // std::cout << "============ Saving matrices for MATLAB comparison ============" << std::endl;
     // const std::string out = OUTPUT_DIR;
     // save_sparse_complex_binary(dg_out.A, out + "/dg_A_cpp.bin");

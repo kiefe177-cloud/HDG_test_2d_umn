@@ -15,6 +15,7 @@
 #include <iostream>
 #include <complex>
 #include <chrono>
+#include <omp.h>
 
 namespace{
 using SparseCD  = Eigen::SparseMatrix<std::complex<double>>;
@@ -129,15 +130,15 @@ dg dg_mat_2Roe(const SimulationParams& params, const double omega,
     
     SparseD BC = BC_adiabatic;
 
-    result.A.resize(3 * Ne * Me, 3 * Ne * Me);
+    //result.A.resize(3 * Ne * Me, 3 * Ne * Me);
     result.B.resize(3 * Ne * Me, Nf * Mf);
     result.C.resize(Nf * Mf,     3 * Ne * Me);
     result.D.resize(Nf * Mf,     Nf * Mf);
 
-    result.Ik.resize(Ne);
+    result.iK.resize(Ne);
     result.QB.resize(Ne);
     result.QC.resize(Ne);
-    result.D_factors.resize(Ne);
+    result.QiD.resize(Ne);
 
     const int rows_per_var = p + 1;
 
@@ -176,10 +177,13 @@ dg dg_mat_2Roe(const SimulationParams& params, const double omega,
     ////////////////////////// dg.A ////////////////////////////////////
     std::cout << "===== dg.A started =====" << std::endl;
 
-    // Setup dg.A
-    std::vector<Eigen::Triplet<cdouble>> A_triplets;
-    A_triplets.reserve(static_cast<size_t>(15) * Me * Ne);
+    auto t1 = std::chrono::high_resolution_clock::now();
 
+    // // Setup dg.A
+    // std::vector<Eigen::Triplet<cdouble>> A_triplets;
+    // A_triplets.reserve(static_cast<size_t>(15) * Me * Ne);
+
+    #pragma omp parallel for schedule(dynamic)
     for (int i1 = 0; i1 < Ne; ++i1){
         SparseD J = kron_sparse(I,msh.elem[i1].J);
         SparseD Ja11 = kron_sparse(I,msh.elem[i1].Ja11);
@@ -330,70 +334,63 @@ dg dg_mat_2Roe(const SimulationParams& params, const double omega,
         SparseCD Cy = Cy_real.cast<cdouble>();
         SparseCD D  = D_real.cast<cdouble>();
 
-        // Stash blocks into global result.A (uncondensed form) 
-        // May not need for code
-        const int j1 = 3 * Me * i1;
-        auto stash = [&](const SparseCD& B, int row_off, int col_off) {
-            for (int k = 0; k < B.outerSize(); ++k)
-                for (SparseCD::InnerIterator it(B, k); it; ++it)
-                    A_triplets.emplace_back(j1 + row_off + it.row(),
-                                            j1 + col_off + it.col(),
-                                            it.value());
-        };
-        stash(A,  0,    0   );
-        stash(Bx, 0,    Me  );
-        stash(By, 0,    2*Me);
-        stash(Cx, Me,   0   );
-        stash(D,  Me,   Me  );
-        stash(Cy, 2*Me, 0   );
-        stash(D,  2*Me, 2*Me);
+        // // Stash blocks into global result.A (uncondensed form) 
+        // // May not need for code
+        // const int j1 = 3 * Me * i1;
+        // auto stash = [&](const SparseCD& B, int row_off, int col_off) {
+        //     for (int k = 0; k < B.outerSize(); ++k)
+        //         for (SparseCD::InnerIterator it(B, k); it; ++it)
+        //             A_triplets.emplace_back(j1 + row_off + it.row(),
+        //                                     j1 + col_off + it.col(),
+        //                                     it.value());
+        // };
+        // stash(A,  0,    0   );
+        // stash(Bx, 0,    Me  );
+        // stash(By, 0,    2*Me);
+        // stash(Cx, Me,   0   );
+        // stash(D,  Me,   Me  );
+        // stash(Cy, 2*Me, 0   );
+        // stash(D,  2*Me, 2*Me);
 
         // Build QB, QC for the condensed solve
         SparseCD QB = sparse_block_t<cdouble>({{ Bx, By }});
         SparseCD QC = sparse_block_t<cdouble>({{ Cx }, { Cy }});
 
-        //auto t3 = std::chrono::high_resolution_clock::now();
+        // Form inv(D)
+        Eigen::SparseLU<SparseD> D_solver;
+        D_solver.compute(D_real);
+        Eigen::MatrixXd Dinv_real = D_solver.solve(
+            Eigen::MatrixXd::Identity(D_real.rows(), D_real.cols()));
 
-        // Factor D once — store for later use in dg_solve
-        auto solver = std::make_unique<Eigen::SparseLU<SparseD>>();
-        solver->compute(D_real);
-        if (solver->info() != Eigen::Success) {
-            std::cerr << "SparseLU factorization failed on element " << i1 << "\n";
-        }
+        // Store QiD as sparse
+        SparseCD QiD = kron_sparse(I2, Dinv_real.sparseView(0.0, 1e-14)).cast<cdouble>();
 
-        //auto t4 = std::chrono::high_resolution_clock::now();
-
-        // Form inv(D) LOCALLY for the iK computation
-        Eigen::MatrixXd I_dense = Eigen::MatrixXd::Identity(D_real.rows(), D_real.cols());
-        SparseD Dinv_real = solver->solve(I_dense).sparseView(0.0, 1e-14);
-
-        //auto t5 = std::chrono::high_resolution_clock::now();
-
-        // Build iK = A - QB * QiD * QC where QiD = kron(I_2, inv(D))
-        SparseCD QiD = kron_sparse(I2, Dinv_real).cast<cdouble>();
+        // Store iK as sparse (no factorization)
         SparseCD iK = A - QB * QiD * QC;
         iK.prune(cdouble(0.0, 0.0), 1e-14);
 
-        // Store factorization (NOT inv(D) or QiD) for downstream use in dg_solve
+        // Store sparse matrices only
         result.QB[i1]  = QB;
         result.QC[i1]  = QC;
-        result.D_factors[i1] = std::move(solver);
-        result.Ik[i1]  = iK;
-
-        // std::cout << "  Cx/Cy/D build:     " << std::chrono::duration<double>(t2-t1).count() << " s\n";
+        result.QiD[i1] = QiD;
+        result.iK[i1]  = iK;
+    
+        //std::cout << "  Cx/Cy/D build:     " << std::chrono::duration<double>(t2-t1).count() << " s\n";
         // std::cout << "  cast+stash+QB/QC:  " << std::chrono::duration<double>(t3-t2).count() << " s\n";
         // std::cout << "  SparseLU compute:  " << std::chrono::duration<double>(t4-t3).count() << " s\n";
         // std::cout << "  form inv(D):       " << std::chrono::duration<double>(t5-t4).count() << " s\n";
     }
     
-    // Put together dg.A, may not need to compile
-    result.A.setFromTriplets(A_triplets.begin(), A_triplets.end());
-    result.A.prune(cdouble(0.0, 0.0), 1e-14);
+    // // Put together dg.A, may not need to compile
+    // result.A.setFromTriplets(A_triplets.begin(), A_triplets.end());
+    // result.A.prune(cdouble(0.0, 0.0), 1e-14);
 
-    A_triplets.clear();
-    A_triplets.shrink_to_fit();
+    // A_triplets.clear();
+    // A_triplets.shrink_to_fit();
+    auto t2 = std::chrono::high_resolution_clock::now();
 
     std::cout << "===== dg.A complete =====" << std::endl;
+    std::cout << "dg.A: " << std::chrono::duration<double>(t2 - t1).count() << " s\n";
 
     ////////////////////////// dg.B ////////////////////////////////////
     std::cout << "===== dg.B started =====" << std::endl;
@@ -464,6 +461,8 @@ dg dg_mat_2Roe(const SimulationParams& params, const double omega,
 
     B_triplets.clear();
     B_triplets.shrink_to_fit();
+    auto t3 = std::chrono::high_resolution_clock::now();
+    std::cout << "dg.B: " << std::chrono::duration<double>(t3 - t2).count() << " s\n";
 
     std::cout << "===== dg.B complete =====" << std::endl;
     ////////////////////////// dg.C ////////////////////////////////////
@@ -542,8 +541,10 @@ dg dg_mat_2Roe(const SimulationParams& params, const double omega,
 
     C_triplets.clear();
     C_triplets.shrink_to_fit();
+    auto t4 = std::chrono::high_resolution_clock::now();
 
     std::cout << "===== dg.C complete =====" << std::endl;
+    std::cout << "dg.C: " << std::chrono::duration<double>(t4 - t3).count() << " s\n";
 
     ////////////////////////// dg.D ////////////////////////////////////
     std::vector<Eigen::Triplet<cdouble>> D_triplets;
@@ -641,6 +642,10 @@ dg dg_mat_2Roe(const SimulationParams& params, const double omega,
     D_triplets.shrink_to_fit();
 
     std::cout << "===== dg.D complete =====" << std::endl;
-    
+    auto t5 = std::chrono::high_resolution_clock::now();
+
+    std::cout << "dg.D: " << std::chrono::duration<double>(t5 - t4).count() << " s\n";
+
+
     return result;
 }

@@ -6,6 +6,7 @@ cmake_policy(SET CMP0074 NEW)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
+find_package(OpenMP REQUIRED)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 if(NOT CMAKE_BUILD_TYPE)
@@ -96,7 +97,7 @@ set(SOURCE_FILES
 )
 
 add_library(cfd_core ${SOURCE_FILES})
-target_link_libraries(cfd_core PUBLIC hdf5::hdf5-shared)
+target_link_libraries(cfd_core PUBLIC hdf5::hdf5-shared OpenMP::OpenMP_CXX)
 target_include_directories(cfd_core PUBLIC
     "${CMAKE_SOURCE_DIR}/external/eigen-5.0.0"
     "${CMAKE_SOURCE_DIR}/external/HighFive/include"

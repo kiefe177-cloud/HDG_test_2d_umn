@@ -17,17 +17,16 @@ struct dg
     using SparseD   = Eigen::SparseMatrix<double>;
     
 
-    SparseCD A;
+    //SparseCD A;
     SparseCD B;
     SparseCD C;
     SparseCD D;
 
-    std::vector<SparseCD>   Ik;
+    //std::vector<SparseCD>   Ik;
     std::vector<SparseCD>   QB;
     std::vector<SparseCD>   QC;
-
-    std::vector<std::unique_ptr<Eigen::SparseLU<SparseD>>> D_factors;
-    
+    std::vector<SparseCD>   iK;
+    std::vector<SparseCD>   QiD;
 };
 
 dg dg_mat_2Roe(const SimulationParams& params, const double omega,
