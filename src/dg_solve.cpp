@@ -3,6 +3,7 @@
 #include <iostream>
 #include <vector>
 #include <complex>
+// #include <Eigen/PardisoSupport>
 
 namespace {
 using Complex   = std::complex<double>;
@@ -13,9 +14,9 @@ using MatrixCD  = Eigen::MatrixXcd;
 
 SparseCD solveA(const SparseCD& b, const Msh& msh, const dg& dg_, const int nvar)
 {
-    int p = msh.elem[0].p;
+    int p  = msh.elem[0].p;
     int Ne = msh.elem.size();
-    int Me = nvar * (p+1) * (p+1);
+    int Me = nvar * (p + 1) * (p + 1);
 
     // Pre-extract each element's rows from b (middleRows is not thread-safe on sparse)
     std::vector<SparseCD> b_tops(Ne), b_bots(Ne);
@@ -37,10 +38,10 @@ SparseCD solveA(const SparseCD& b, const Msh& msh, const dg& dg_, const int nvar
 
         if (tid == 0)
             std::cout << "solveA running on " << omp_get_num_threads() << " threads" << std::endl;
-        
+
         #pragma omp for schedule(dynamic)
         for (int i1 = 0; i1 < Ne; i1++) {
-            auto ta = std::chrono::high_resolution_clock::now();
+            // auto ta = std::chrono::high_resolution_clock::now();
 
             int j1 = 3 * Me * i1;
             int j3 = j1 + Me;
@@ -48,67 +49,74 @@ SparseCD solveA(const SparseCD& b, const Msh& msh, const dg& dg_, const int nvar
             const SparseCD& b_top = b_tops[i1];
             const SparseCD& b_bot = b_bots[i1];
 
+            // r = b_top - QB * (QiD * b_bot)
             SparseCD r = b_top - dg_.QB[i1] * (dg_.QiD[i1] * b_bot);
-            auto tb = std::chrono::high_resolution_clock::now();
+            // auto tb = std::chrono::high_resolution_clock::now();
 
+            // Find columns of r that have at least one nonzero
             std::vector<int> ind;
-            for (int col = 0; col < r.outerSize(); ++col)
-                if (SparseCD::InnerIterator(r, col))
-                    ind.push_back(col);
-
-            if (ind.empty()) {
-                SparseCD xx_bot = dg_.QiD[i1] * b_bot;
-                for (int k = 0; k < xx_bot.outerSize(); ++k)
-                    for (SparseCD::InnerIterator it(xx_bot, k); it; ++it)
-                        if (std::abs(it.value()) > 1e-14)
-                            local_trips.emplace_back(j3 + it.row(), it.col(), it.value());
-                continue;
+            ind.reserve(r.outerSize());
+            for (int col = 0; col < r.outerSize(); ++col) {
+                SparseCD::InnerIterator it(r, col);
+                if (it) ind.push_back(col);
             }
+
+            // ------------------------------------------------------------------
+            // Always emit bottom contribution from QiD * b_bot (over b_bot's columns)
+            // ------------------------------------------------------------------
+            SparseCD QiD_bbot = dg_.QiD[i1] * b_bot;
+            for (int k = 0; k < QiD_bbot.outerSize(); ++k)
+                for (SparseCD::InnerIterator it(QiD_bbot, k); it; ++it)
+                    if (std::abs(it.value()) > 1e-14)
+                        local_trips.emplace_back(j3 + it.row(), it.col(), it.value());
+
+            // If r is empty there's no top block and no QC correction
+            if (ind.empty())
+                continue;
 
             int nc = static_cast<int>(ind.size());
 
-            Eigen::MatrixXcd r_dense(Me, nc);
-            for (int jj = 0; jj < nc; ++jj) {
-                r_dense.col(jj).setZero();
+            // Pack the nc active columns of r into a dense (Me x nc) matrix
+            Eigen::MatrixXcd r_dense = Eigen::MatrixXcd::Zero(Me, nc);
+            for (int jj = 0; jj < nc; ++jj)
                 for (SparseCD::InnerIterator it(r, ind[jj]); it; ++it)
                     r_dense(it.row(), jj) = it.value();
-            }
 
+            // Solve K * xx_top = r for the active columns
             Eigen::MatrixXcd xx_top_dense = dg_.iK_factors[i1]->solve(r_dense);
-            auto tc = std::chrono::high_resolution_clock::now();
+            // auto tc = std::chrono::high_resolution_clock::now();
 
-            std::vector<Eigen::Triplet<Complex>> top_trips;
+            // Scatter top block directly into local_trips
             for (int jj = 0; jj < nc; ++jj) {
                 int col = ind[jj];
-                for (int row = 0; row < Me; ++row)
-                    if (std::abs(xx_top_dense(row, jj)) > 1e-14)
-                        top_trips.emplace_back(row, col, xx_top_dense(row, jj));
+                for (int row = 0; row < Me; ++row) {
+                    Complex v = xx_top_dense(row, jj);
+                    if (std::abs(v) > 1e-14)
+                        local_trips.emplace_back(j1 + row, col, v);
+                }
             }
-            SparseCD xx_top_sparse(Me, b.cols());
-            xx_top_sparse.setFromTriplets(top_trips.begin(), top_trips.end());
-            auto td = std::chrono::high_resolution_clock::now();
+            // auto td = std::chrono::high_resolution_clock::now();
 
-            for (auto& t : top_trips)
-                local_trips.emplace_back(j1 + t.row(), t.col(), t.value());
-
-            SparseCD xx_bot = dg_.QiD[i1] * (b_bot - dg_.QC[i1] * xx_top_sparse);
-            auto te = std::chrono::high_resolution_clock::now();
-
-            for (int k = 0; k < xx_bot.outerSize(); ++k)
-                for (SparseCD::InnerIterator it(xx_bot, k); it; ++it)
-                    if (std::abs(it.value()) > 1e-14)
-                        local_trips.emplace_back(j3 + it.row(), it.col(), it.value());
-            auto tf = std::chrono::high_resolution_clock::now();
+            // Bottom correction: -QiD * QC * xx_top, dense, over ind columns
+            Eigen::MatrixXcd corr = dg_.QiD[i1] * (dg_.QC[i1] * xx_top_dense);
+            for (int jj = 0; jj < nc; ++jj) {
+                int col = ind[jj];
+                for (int row = 0; row < 2 * Me; ++row) {
+                    Complex v = -corr(row, jj);
+                    if (std::abs(v) > 1e-14)
+                        local_trips.emplace_back(j3 + row, col, v);
+                }
+            }
+            // auto te = std::chrono::high_resolution_clock::now();
 
             // #pragma omp critical
             // {
             //     std::cout << "Elem " << i1
             //               << "  nc=" << nc
-            //               << "  r=" << std::chrono::duration<double>(tb-ta).count()
-            //               << "  solve=" << std::chrono::duration<double>(tc-tb).count()
-            //               << "  build_sparse=" << std::chrono::duration<double>(td-tc).count()
-            //               << "  bot_multiply=" << std::chrono::duration<double>(te-td).count()
-            //               << "  scatter=" << std::chrono::duration<double>(tf-te).count()
+            //               << "  r="     << std::chrono::duration<double>(tb - ta).count()
+            //               << "  solve=" << std::chrono::duration<double>(tc - tb).count()
+            //               << "  top="   << std::chrono::duration<double>(td - tc).count()
+            //               << "  bot="   << std::chrono::duration<double>(te - td).count()
             //               << " s\n";
             // }
         }
@@ -189,23 +197,31 @@ HDG_Result dg_solve(const VectorCD& src_e, const VectorCD& src_f,
         std::cout << "solveA(E) + R: " << std::chrono::duration<double>(t4 - t3).count() << " s\n";
     }
 
-    // // Trace solve: u_f = K \ R
-    // Eigen::SparseLU<SparseCD> K_solver;
-    // K_solver.compute(K);
-    // if (K_solver.info() != Eigen::Success)
-    //     std::cerr << "SparseLU factorization failed on global K\n";
-    // result.u_f = K_solver.solve(R);
-    // auto t4 = std::chrono::high_resolution_clock::now();
-    // std::cout << "K\\R: " << std::chrono::duration<double>(t4 - t3).count() << " s\n";
+    auto t3b = std::chrono::high_resolution_clock::now();
 
-    // // Back-sub: u_e = solveA(src_e - B * u_f)
-    // VectorCD rhs_back = src_e - dg_.B * result.u_f;
-    // result.u_e = solveA_vec(rhs_back, msh, dg_, nvar);
-    // auto t5 = std::chrono::high_resolution_clock::now();
-    // std::cout << "Back-sub: " << std::chrono::duration<double>(t5 - t4).count() << " s\n";
+    Eigen::SparseLU<SparseCD> K_solver;
+    K_solver.analyzePattern(K);
+    K_solver.factorize(K);
+    if (K_solver.info() != Eigen::Success) {
+        std::cerr << "Pardiso factorization failed on global K\n";
+        return result;
+    }
 
-    // std::cout << "Total dg_solve: " << std::chrono::duration<double>(t5 - t0).count() << " s\n";
+    result.u_f = K_solver.solve(R);
+    if (K_solver.info() != Eigen::Success) {
+        std::cerr << "Pardiso solve failed on global K\n";
+        return result;
+    }
+    auto t4 = std::chrono::high_resolution_clock::now();
+    std::cout << "K\\R: " << std::chrono::duration<double>(t4 - t3b).count() << " s\n";
 
+    VectorCD rhs_back = src_e - dg_.B * result.u_f;
+    result.u_e = solveA_vec(rhs_back, msh, dg_, nvar);
+    auto t5 = std::chrono::high_resolution_clock::now();
+    std::cout << "Back-sub: " << std::chrono::duration<double>(t5 - t4).count() << " s\n";
+
+    std::cout << "Total dg_solve: " << std::chrono::duration<double>(t5 - t0).count() << " s\n";
+    
     result.K = K;
     result.R = R;
     return result;
