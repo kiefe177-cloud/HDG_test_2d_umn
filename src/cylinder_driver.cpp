@@ -31,6 +31,7 @@ elliptic solve
 #include "hdg/mesh_utils.h"
 #include "hdg/io_utils.h" // For save_csv
 #include "hdg/save_grid_diagnostics.h" // For save_grid_diagnostics
+#include "hdg/save_outputs_h5.h"
 #include "parameters/MalikSpallParams.h"
 #include "hdg/debug_print.h"  
 
@@ -438,8 +439,8 @@ int main(){
         elem_y.col(i1) = msh.elem[i1].y.reshaped();
     }
     
-    save_csv(std::string(OUTPUT_DIR) + "/elem_x.csv",elem_x);
-    save_csv(std::string(OUTPUT_DIR) + "/elem_y.csv",elem_y);
+    // save_csv(std::string(OUTPUT_DIR) + "/elem_x.csv",elem_x);
+    // save_csv(std::string(OUTPUT_DIR) + "/elem_y.csv",elem_y);
 
 
     // Faces interpolation
@@ -630,9 +631,12 @@ int main(){
 
     HDG_Result result_hdg = dg_solve(src_e_cd,src_f_cd,msh,dg_out,nvar);
 
-    
-    save_sparse_complex_binary(result_hdg.K, out + "/K_cpp.bin");
-    save_vector_complex_binary(out + "/R_cpp.bin",result_hdg.R);
-    std::cout << "Saved K and R to " << out << "\n";
+    save_outputs_h5(std::string(OUTPUT_DIR) + "/cyl_outputs.h5",
+        tfi_grid.Phi_tfi, tfi_grid.Psi_tfi,
+        result.X_ellip_grid, result.Y_ellip_grid,msh,brho,brhou,brhov,brhow,bE,Ne,Nf,Me,Mf,p,result_hdg.u_e,result_hdg.u_f);
+
+    // save_sparse_complex_binary(result_hdg.K, out + "/K_cpp.bin");
+    // save_vector_complex_binary(out + "/R_cpp.bin",result_hdg.R);
+    // std::cout << "Saved K and R to " << out << "\n";
 
 }

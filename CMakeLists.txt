@@ -8,12 +8,16 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 find_package(OpenMP REQUIRED)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-
 if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
 set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g3")
+
+# Release tuning
+if(CMAKE_BUILD_TYPE STREQUAL "Release" AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    add_compile_options(-march=native -funroll-loops)
+endif()
 
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 
@@ -83,6 +87,7 @@ set(SOURCE_FILES
     src/plot_comp_tfi_grid.cpp
     src/read_cone_dat_file.cpp
     src/save_grid_diagnostics.cpp
+    src/save_outputs_h5.cpp
     src/sd.cpp
     src/sem1.cpp
     src/sem2.cpp
